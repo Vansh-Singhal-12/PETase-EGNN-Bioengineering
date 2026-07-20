@@ -20,22 +20,25 @@ class PETaseMutationDataset(Dataset):
         return len(self.mutations)
 
     def __getitem__(self, idx):
-        # For now, I return our base graph and a placeholder target score for testing
-        # Once I load a real CSV, this will pull the real stability values
+        #Default placeholder values for testing if no spreadsheet exists
         if self.mutations is None:
             dummy_target = torch.tensor([0.5], dtype=torch.float)
-            return self.base_graph, dummy_target
+            #Let's assume a test mutation happens at residue index 120
+            dummy_mutation_position = torch.tensor([120], dtype=torch.long) 
+            return self.base_graph, dummy_target, dummy_mutation_position
             
-        # This is where I will map the specific spreadsheet row to our graph
         row = self.mutations.iloc[idx]
         target_score = torch.tensor([row['stability_score']], dtype=torch.float)
         
-        return self.base_graph, target_score
+        #Pull the exact residue position index from the spreadsheet column
+        #Assumes that CSV has a 'position_idx" column (e.g., 0 to 264)
+        mutation_position = torch.tensor([row['position_idx']], dtype=torch.long)
+        return self.base_graph, target_score, mutation_position
 
 if __name__ == "__main__":
     print("Testing dataset utility script...")
     try:
-        # Dry run test using our existing PDB file
+        # Dry run test using the existing PDB file
         test_dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb")
         sample_graph, sample_target = test_dataset[0]
         
