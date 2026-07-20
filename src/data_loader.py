@@ -1,5 +1,6 @@
 import os
 import torch
+import numpy as np
 from torch_geometric.data import Data
 from Bio.PDB import PDBParser
 
@@ -43,8 +44,8 @@ def load_protein_as_graph(pdb_path, distance_cutoff=8.0):
                     coordinates.append(ca_atom.get_coord())
                     node_features.append(AMINO_ACID_MAPPING[res_name])
                     
-    # Convert our lists into PyTorch tensors
-    positions = torch.tensor(coordinates, dtype=torch.float) 
+    #Convert the lists into PyTorch tensors cleanly via Numpy to prevent warnings
+    positions = torch.tensor(np.array(coordinates), dtype=torch.float)
     x_features = torch.tensor(node_features, dtype=torch.long) 
     
     num_nodes = positions.size(0)
