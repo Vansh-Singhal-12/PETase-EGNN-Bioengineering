@@ -25,7 +25,7 @@ def run_training():
     # Put the model in training mode
     model.train()
     
-    # INDENTATION FIX: This whole loop must live inside the run_training function
+    # Core training execution loop
     for epoch in range(1, 6):
         # Reset gradients so updates don't accumulate incorrectly
         optimizer.zero_grad()
@@ -36,12 +36,12 @@ def run_training():
         # Pass data through the model to get all 265 residue predictions
         all_predictions = model(graph_data)
         
-       #Extract Only the prediction at our mutated residue position
-       #shape changes from [265,1] -> [1] to perfectly match the target score
-        current_pred = all_predictions[mutation_position]
+       #Optimized: Force both tensors into matching flat 1D vector shapes [1]
+        current_pred = all_predictions[mutation_position].view(-1)
+        target_id = target_score.view(-1)
 
         # Calculate how far off our specific local prediction was from the target
-        loss = criterion(current_pred, target_score)
+        loss = criterion(current_pred, target_id)
         
         # Backpropagation: calculate the error gradients
         loss.backward()
