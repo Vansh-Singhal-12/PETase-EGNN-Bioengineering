@@ -40,12 +40,13 @@ if __name__ == "__main__":
     try:
         # Dry run test using the existing PDB file
         test_dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb")
-        sample_graph, sample_target = test_dataset[0]
+        sample_graph, sample_target, sample_pos = test_dataset[0]
         
         print("-" * 30)
         print(f"Dataset items available : {len(test_dataset)}")
-        print(f"Graph nodes verified    : {sample_graph.num_nodes}")
+        print(f"Graph nodes verified     : {sample_graph.num_nodes}")
         print(f"Target tensor shape     : {sample_target.shape}")
+        print(f"Mutation position index  : {sample_pos.item()}")
         print("-" * 30)
         print("Dataset script is working smoothly.")
         
