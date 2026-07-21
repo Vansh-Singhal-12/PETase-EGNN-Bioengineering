@@ -1,0 +1,6 @@
+wild_type,mutation_type,position_idx,stability_score
+S,A,120,-1.25
+I,R,179,2.40
+A,K,204,-0.85
+N,Q,65,0.15
+G,W,212,1.95
