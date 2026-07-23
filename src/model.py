@@ -81,7 +81,7 @@ class PETaseStabilityEGNN(nn.Module):
         super(PETaseStabilityEGNN, self).__init__()
         
         # Maps integer values (0-19) to vector spaces
-        self.embedding = nn.Embedding(num_amino_acids, emb_dim)
+        self.embedding = nn.Linear(num_amino_acids, emb_dim)
         
         # Two layers of message passing for structural depth
         self.egnn_layer1 = EGNNLayer(emb_dim)
@@ -95,7 +95,7 @@ class PETaseStabilityEGNN(nn.Module):
         )
 
     def forward(self, data):
-        h = self.embedding(data.x)
+        h = self.embedding(data.x.float())
         pos = data.pos
         edge_index = data.edge_index
         

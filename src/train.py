@@ -14,7 +14,7 @@ def run_training():
     )
     
     # 2. Initialize the EGNN model
-    model = PETaseStabilityEGNN(num_amino_acids=20, emb_dim=32)
+    model = PETaseStabilityEGNN(num_amino_acids=4, emb_dim=32)
     
     # 3. Define our Loss Function and Optimizer
     criterion = nn.MSELoss()
