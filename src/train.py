@@ -1,8 +1,21 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import random
+import numpy as np
 from src.dataset import PETaseMutationDataset
 from src.model import PETaseStabilityEGNN
+
+RANDOM_SEED = 42
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(RANDOM_SEED)
+
+# Ensure deterministic algorithms in PyTorch backends
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def run_training():
     print("Setting up training loop...")
@@ -33,10 +46,10 @@ def run_training():
         # Inner loop: Iterate through every single mutation row in the CSV
         for idx in range(len(dataset)):
             # Reset gradients so updates don't accumulate incorrectly
-            optimizer.zero_zero_grad() if hasattr(optimizer, 'zero_zero_grad') else optimizer.zero_grad()
+            optimizer.zero_grad()
             
-            # Grab the specific graph, score, and position for this row
-            graph_data, target_score, mutation_position = dataset[idx]
+            # Grab graph, target score, position, and active site shield mask
+            graph_data, target_score, mutation_position, active_site_shield = dataset[idx]
             
             # Pass data through the model to get all 265 residue predictions
             all_predictions = model(graph_data)
