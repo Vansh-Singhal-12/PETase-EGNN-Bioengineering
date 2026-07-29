@@ -77,11 +77,15 @@ class PETaseMutationDataset(Dataset):
             return self.base_graph, torch.tensor([0.0]), torch.tensor([120]), self.active_site_shield
             
         row = self.mutations.iloc[idx]
-        target_score = torch.tensor([row['stability_score']], dtype=torch.float)
+        
+        # Explicit column extractions by name (safely ignores metadata columns like variant_name)
+        target_score = torch.tensor([float(row['stability_score'])], dtype=torch.float)
         mutation_position = int(row['position_idx'])
         mutation_pos_tensor = torch.tensor([mutation_position], dtype=torch.long)
         
-        mutant_aa_letter = str(row['mutation_type']).upper().strip()
+        # Extract mutated amino acid letter (e.g., '121D' -> 'D')
+        mutation_str = str(row['mutation_type']).strip().upper()
+        mutant_aa_letter = mutation_str[-1] if len(mutation_str) > 0 else 'A'
         mutant_props = AA_PHYSICAL_PROPERTIES.get(mutant_aa_letter, [89.1, 1.8, 0.0, 0.0])
         
         mutated_graph = self.base_graph.clone()
