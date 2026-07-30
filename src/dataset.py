@@ -33,8 +33,8 @@ class PETaseMutationDataset(Dataset):
         num_nodes = self.coords.shape[0]
         
         # High-precision indices for IsPETase Catalytic Triad: S120, D177, H208
-        # Clamp indices to valid graph bounds to prevent out-of-index errors
-        self.triad_indices = [min(idx, num_nodes - 1) for idx in [120, 177, 208]]
+        # Safely convert 1-based residue numbers to 0-based node indices with clamping
+        self.triad_indices = [max(0, min(idx - 1, num_nodes - 1)) for idx in [120, 177, 208]]
         self.active_site_shield = self._compute_active_site_shield()
         
         # Convert integer amino acid IDs to continuous 4D biophysical property vectors
@@ -78,12 +78,16 @@ class PETaseMutationDataset(Dataset):
             
         row = self.mutations.iloc[idx]
         
-        # Explicit column extractions by name (safely ignores metadata columns like variant_name)
+        # Explicit column extractions by name
         target_score = torch.tensor([float(row['stability_score'])], dtype=torch.float)
-        mutation_position = int(row['position_idx'])
+        
+        # Convert 1-based PDB residue index to 0-based graph node index with bounds protection
+        raw_pos = int(row['position_idx'])
+        num_nodes = self.base_graph.pos.shape[0]
+        mutation_position = max(0, min(raw_pos - 1, num_nodes - 1))
         mutation_pos_tensor = torch.tensor([mutation_position], dtype=torch.long)
         
-        # Extract mutated amino acid letter (e.g., '121D' -> 'D')
+        # Extract mutated amino acid letter (e.g., 'S121E' -> 'E' or '121D' -> 'D')
         mutation_str = str(row['mutation_type']).strip().upper()
         mutant_aa_letter = mutation_str[-1] if len(mutation_str) > 0 else 'A'
         mutant_props = AA_PHYSICAL_PROPERTIES.get(mutant_aa_letter, [89.1, 1.8, 0.0, 0.0])
