@@ -47,7 +47,7 @@ def run_training():
     
     dataset = PETaseMutationDataset(
         pdb_path="data/6eqe.pdb",
-        csv_path="data/mutations.csv"
+        csv_path="data/mutations_clean.csv"
     )
     
     model = PETaseStabilityEGNN(num_amino_acids=4, emb_dim=32)
@@ -60,7 +60,8 @@ def run_training():
     
     model.train()
     
-    for epoch in range(1, 6):
+    NUM_EPOCHS = 200
+    for epoch in range(1, NUM_EPOCHS + 1):
         epoch_loss = 0.0
         predictions_list = []
         targets_list = []
@@ -107,7 +108,7 @@ def run_training():
             torch.save(model.state_dict(), "checkpoints/best_egnn.pt")
             saved_flag = " ➔ [MODEL SAVED]"
             
-        print(f"Epoch {epoch}/5 | Loss: {avg_epoch_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f}{saved_flag}")
+        print(f"Epoch {epoch}/{NUM_EPOCHS} | Loss: {avg_epoch_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f}{saved_flag}")
         
     print("-" * 75)
     print(f"Training complete. Best Spearman ρ achieved: {best_spearman_rho:.4f}")
