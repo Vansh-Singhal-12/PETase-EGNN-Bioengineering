@@ -22,22 +22,18 @@ def evaluate_phase2_benchmark(pdb_path="data/6eqe.pdb", benchmark_csv="data/benc
         print(f"Model checkpoint '{checkpoint_path}' not found. Train the model first.")
         return
 
-    # Load ground-truth benchmark CSV
     df_benchmark = pd.read_csv(benchmark_csv)
     expected_length = len(df_benchmark)
     
-    # --- Data-Length Test Enforcement ---
     print(f"Loaded {expected_length} benchmark rows from '{benchmark_csv}'")
     
-    # Instantiate dataset and model
     dataset = PETaseMutationDataset(pdb_path=pdb_path, csv_path=benchmark_csv)
     
-    # Data-Length Test Assertion
     assert len(dataset) == expected_length, f"[DATA-LENGTH TEST FAILED] Expected {expected_length} rows, but dataset yielded {len(dataset)}."
     print("[DATA-LENGTH TEST PASSED] Verification: Prediction array length matches benchmark dataset.")
 
-    # Load Model Checkpoint
-    model = PETaseStabilityEGNN(num_amino_acids=4, emb_dim=32)
+    # Load Model Checkpoint with 10Å neighborhood pooling
+    model = PETaseStabilityEGNN(num_amino_acids=4, emb_dim=32, radius=10.0)
     model.load_state_dict(torch.load(checkpoint_path, map_location=torch.device('cpu')))
     model.eval()
     
@@ -47,21 +43,20 @@ def evaluate_phase2_benchmark(pdb_path="data/6eqe.pdb", benchmark_csv="data/benc
     with torch.no_grad():
         for idx in range(len(dataset)):
             graph_data, target_score, mutation_pos, _ = dataset[idx]
-            all_preds = model(graph_data)
             
-            pred_val = all_preds[mutation_pos].item()
+            # Pass mutation_pos into the updated forward pass
+            pred_val = model(graph_data, mutation_pos).item()
+            
             predictions.append(pred_val)
             targets.append(target_score.item())
 
     predictions = np.array(predictions)
     targets = np.array(targets)
     
-    # --- Calculate Core Benchmark Metrics ---
-    # 1. Linear Regression for R^2 and p-value
+    # Calculate Core Benchmark Metrics
     slope, intercept, r_value, p_value, std_err = linregress(predictions, targets)
     r_squared = r_value ** 2
     
-    # 2. Rank Correlations
     spearman_rho, _ = spearmanr(predictions, targets)
     pearson_r, _ = pearsonr(predictions, targets)
 
@@ -73,7 +68,6 @@ def evaluate_phase2_benchmark(pdb_path="data/6eqe.pdb", benchmark_csv="data/benc
     print(f"  • Pearson Correlation (r)          : {pearson_r:.4f}")
     print("-" * 65)
     
-    # Acceptance Validation
     if r_squared >= 0.75 and p_value < 0.05:
         print("SUCCESS: Benchmark targets satisfied (R² ≥ 0.75, p < 0.05).")
     else:
