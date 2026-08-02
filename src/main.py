@@ -3,7 +3,7 @@ from src.data_loader import load_protein_as_graph
 from src.model import PETaseStabilityEGNN
 
 def run_pipeline():
-    print("Running data-to-model pipeline...")
+    print("Running data-to-model pipeline check...")
     
     pdb_path = "data/6eqe.pdb"
     
@@ -11,20 +11,21 @@ def run_pipeline():
     protein_graph = load_protein_as_graph(pdb_path, distance_cutoff=8.0)
     
     # Initialize the EGNN model
-    model = PETaseStabilityEGNN(num_amino_acids=20, emb_dim=32)
+    model = PETaseStabilityEGNN(num_amino_acids=20, emb_dim=32, radius=10.0)
     model.eval()
+    
+    # Pick a dummy mutation position (e.g., residue index 0) for the dry run
+    dummy_mutation_pos = 0
     
     # Run the graph through the network layers
     with torch.no_grad():
-        predictions = model(protein_graph)
+        prediction = model(protein_graph, dummy_mutation_pos)
         
-    print("-" * 30)
-    print(f"Output Tensor Shape : {predictions.shape}")
-    print(f"Total Predicted Nodes: {predictions.size(0)}")
-    print("-" * 30)
-    
-    print(f"Sample raw outputs (first 5 nodes):\n{predictions[:5].flatten()}")
-    print("Everything is working smoothly.")
+    print("-" * 40)
+    print(f"Output Tensor: {prediction}")
+    print(f"Output Shape : {prediction.shape}")
+    print("-" * 40)
+    print("Pipeline check passed smoothly.")
 
 if __name__ == "__main__":
     run_pipeline()

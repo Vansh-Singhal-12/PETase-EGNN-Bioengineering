@@ -58,7 +58,7 @@ class CompositeMarginLoss(nn.Module):
 
 
 def run_training():
-    print("Setting up training loop with Composite Margin-Ranking Loss & Neighborhood Pooling...")
+    print("Setting up stabilized training loop with Cosine Annealing & Early Stopping...")
     
     os.makedirs("checkpoints", exist_ok=True)
     
@@ -67,16 +67,24 @@ def run_training():
         csv_path="data/mutations_clean.csv"
     )
     
-    model = PETaseStabilityEGNN(num_amino_acids=4, emb_dim=32, radius=10.0)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    model = PETaseStabilityEGNN(num_amino_acids=8, emb_dim=32, radius=10.0)
+    
+    # 1. Lower learning rate + AdamW weight decay for regularization
+    optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
+    
+    # 2. Learning rate scheduler: smoothly decay LR across epochs
+    NUM_EPOCHS = 200
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS, eta_min=1e-6)
+    
     criterion = CompositeMarginLoss(margin=0.2, alpha=1.0, beta=0.05)
     
     best_spearman_rho = -1.0
+    patience = 30
+    patience_counter = 0
     
     print(f"Starting training run over all {len(dataset)} dataset rows...")
     print("-" * 75)
     
-    NUM_EPOCHS = 200
     for epoch in range(1, NUM_EPOCHS + 1):
         model.train()
         optimizer.zero_grad()
@@ -97,7 +105,12 @@ def run_training():
         
         loss = criterion(preds_tensor, targets_tensor)
         loss.backward()
+        
+        # Gradient clipping to prevent sudden loss spikes
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
+        scheduler.step()
         
         # Calculate Rank Correlation Metrics
         preds_np = preds_tensor.detach().cpu().numpy()
@@ -112,13 +125,24 @@ def run_training():
         if np.isnan(spearman_rho): spearman_rho = 0.0
         if np.isnan(pearson_r): pearson_r = 0.0
         
+        current_lr = optimizer.param_groups[0]['lr']
         saved_flag = ""
+        
         if spearman_rho > best_spearman_rho:
             best_spearman_rho = spearman_rho
+            patience_counter = 0
             torch.save(model.state_dict(), "checkpoints/best_egnn.pt")
             saved_flag = " ➔ [MODEL SAVED]"
+        else:
+            patience_counter += 1
             
-        print(f"Epoch {epoch}/{NUM_EPOCHS} | Loss: {loss.item():.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f}{saved_flag}")
+        print(f"Epoch {epoch:03d}/{NUM_EPOCHS} | Loss: {loss.item():.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f} | LR: {current_lr:.6f}{saved_flag}")
+        
+        # 3. Early stopping check
+        if patience_counter >= patience:
+            print("-" * 75)
+            print(f"Early stopping triggered at Epoch {epoch}! No improvement in {patience} consecutive epochs.")
+            break
         
     print("-" * 75)
     print(f"Training complete. Best Spearman ρ achieved: {best_spearman_rho:.4f}")

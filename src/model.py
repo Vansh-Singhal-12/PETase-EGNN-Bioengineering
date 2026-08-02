@@ -4,11 +4,12 @@ from torch_geometric.nn import MessagePassing
 
 class EGNNLayer(MessagePassing):
     """
-    A single Equivariant Graph Neural Network Layer.
-    Updates the amino acid features and their 3D coordinates together.
+    Stabilized Equivariant Graph Neural Network Layer.
+    Updates amino acid features and 3D coordinates with damped spatial shifts.
     """
-    def __init__(self, emb_dim):
+    def __init__(self, emb_dim, coord_scale=0.1):
         super(EGNNLayer, self).__init__(aggr="sum")
+        self.coord_scale = coord_scale
         
         # Edge network: handles neighbor features and distance
         self.edge_mlp = nn.Sequential(
@@ -24,29 +25,27 @@ class EGNNLayer(MessagePassing):
             nn.Linear(emb_dim, emb_dim)
         )
         
-        # Coordinate network: figures out the spatial shifts
+        # Coordinate network: figures out spatial shifts
         self.coord_mlp = nn.Sequential(
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, 1),
-            nn.Tanh() # Keeps updates stable so things don't explode
+            nn.Tanh() # Stable updates
         )
 
     def forward(self, h, pos, edge_index):
         return self.propagate(edge_index, h=h, pos=pos)
 
     def message(self, h_i, h_j, pos_i, pos_j):
-        # Calculate squared distance between residue pairs
         coord_diff = pos_i - pos_j
         sq_dist = torch.sum(coord_diff ** 2, dim=-1, keepdim=True)
         
-        # Combine node features and distance for the edge model
         edge_input = torch.cat([h_i, h_j, sq_dist], dim=-1)
         msg = self.edge_mlp(edge_input)
         
-        # Scale the directional vector by learned weights
         coord_weight = self.coord_mlp(msg)
-        coord_msg = coord_diff * coord_weight
+        # Apply scaling factor to prevent coordinate runaway
+        coord_msg = coord_diff * coord_weight * self.coord_scale
         
         return msg, coord_msg
 
@@ -61,11 +60,10 @@ class EGNNLayer(MessagePassing):
     def update(self, aggr_out, h, pos):
         agg_node_msg, agg_coord_msg = aggr_out
         
-        # Generate new node features
         node_input = torch.cat([h, agg_node_msg], dim=-1)
-        h_new = self.node_mlp(node_input)
+        # Residual connection on node features for training stability
+        h_new = h + self.node_mlp(node_input)
         
-        # Update the 3D coordinates based on neighbor vectors
         pos_new = pos + agg_coord_msg
         
         return h_new, pos_new
@@ -73,20 +71,17 @@ class EGNNLayer(MessagePassing):
 
 class PETaseStabilityEGNN(nn.Module):
     """
-    Main model. Uses EGNN layers followed by 10 Angstrom spatial neighborhood pooling.
+    Main model utilizing EGNN layers with smooth spatial neighborhood pooling.
     """
     def __init__(self, num_amino_acids=20, emb_dim=32, radius=10.0):
         super(PETaseStabilityEGNN, self).__init__()
         self.radius = radius
         
-        # Maps one-hot encoded amino acid vectors to continuous embeddings
         self.embedding = nn.Linear(num_amino_acids, emb_dim)
         
-        # Two layers of message passing for structural depth
         self.egnn_layer1 = EGNNLayer(emb_dim)
         self.egnn_layer2 = EGNNLayer(emb_dim)
         
-        # Final regression head taking pooled 10 Angstrom neighborhood features
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
@@ -102,17 +97,15 @@ class PETaseStabilityEGNN(nn.Module):
         h, pos = self.egnn_layer1(h, pos, edge_index)
         h, pos = self.egnn_layer2(h, pos, edge_index)
         
-        # --- 10 Angstrom Spatial Neighborhood Pooling ---
+        # --- Smooth Gaussian Neighborhood Weighting ---
         mut_coord = pos[mutation_pos] # [3]
         distances = torch.norm(pos - mut_coord, dim=-1) # [N]
         
-        # Mask nodes within the 10 Angstrom neighborhood radius
-        mask = distances <= self.radius
+        # Soft continuous weights decaying smooth toward 0 past radius
+        weights = torch.exp(-0.5 * (distances / self.radius) ** 2).unsqueeze(-1) # [N, 1]
         
-        if mask.sum() > 0:
-            pooled_h = h[mask].mean(dim=0)
-        else:
-            pooled_h = h[mutation_pos]
+        # Weighted mean aggregation prevents hard threshold step-discontinuities
+        pooled_h = (h * weights).sum(dim=0) / (weights.sum(dim=0) + 1e-8)
             
         out = self.regression_head(pooled_h)
         return out.squeeze(-1)
