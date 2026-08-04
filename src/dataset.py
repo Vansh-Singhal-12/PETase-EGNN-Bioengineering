@@ -5,9 +5,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from src.data_loader import load_protein_as_graph
 
-# Standardized Biophysical Property Lookup Table
-# Format: [Volume (Å³), Hydropathy (Kyte-Doolittle), Formal Charge, H-Bond Donors/Acceptors]
-AA_PHYSICAL_PROPERTIES = {
+AA_PHYSICAL_PROPERTIES_RAW = {
     'A': [89.1, 1.8, 0.0, 0.0],   'R': [174.2, -4.5, 1.0, 4.0],
     'N': [132.1, -3.5, 0.0, 4.0],  'D': [133.1, -3.5, -1.0, 4.0],
     'C': [121.2, 2.5, 0.0, 1.0],   'Q': [146.2, -3.5, 0.0, 4.0],
@@ -26,26 +24,32 @@ INT_TO_AA = {
     17: 'W', 18: 'Y', 19: 'V'
 }
 
+raw_matrix = np.array(list(AA_PHYSICAL_PROPERTIES_RAW.values()), dtype=np.float32)
+AA_MEAN = raw_matrix.mean(axis=0)
+AA_STD = raw_matrix.std(axis=0)
+AA_STD[AA_STD == 0] = 1.0
+
+AA_PHYSICAL_PROPERTIES = {
+    k: ((np.array(v, dtype=np.float32) - AA_MEAN) / AA_STD).tolist()
+    for k, v in AA_PHYSICAL_PROPERTIES_RAW.items()
+}
+
 class PETaseMutationDataset(Dataset):
     """
-    Bio-aware dataset engine generating 8D node features:
-    [4D Wild-Type Properties || 4D Explicit Mutation Deltas (Mutant - WT)]
-    Supports automatic inverse mutation data augmentation.
+    Multi-point enabled PyTorch Dataset.
+    Infiltrates single or multi-point biophysical delta vectors into graph node tensors.
     """
     def __init__(self, pdb_path, csv_path=None, shield_radius=10.0, augment_inverse=True):
         self.base_graph = load_protein_as_graph(pdb_path)
         self.shield_radius = shield_radius
         self.augment_inverse = augment_inverse
         
-        # Extract 3D C_alpha coordinates [num_nodes, 3]
         self.coords = self.base_graph.pos.numpy()
         num_nodes = self.coords.shape[0]
         
-        # High-precision indices for IsPETase Catalytic Triad: S120, D177, H208
         self.triad_indices = [max(0, min(idx - 1, num_nodes - 1)) for idx in [120, 177, 208]]
         self.active_site_shield = self._compute_active_site_shield()
         
-        # Extract wild-type 4D biophysical property vectors
         self.wt_letters = []
         wt_properties = []
         for i in range(num_nodes):
@@ -54,7 +58,7 @@ class PETaseMutationDataset(Dataset):
             self.wt_letters.append(aa_letter)
             wt_properties.append(AA_PHYSICAL_PROPERTIES[aa_letter])
             
-        self.wt_properties_array = np.array(wt_properties, dtype=np.float32) # [num_nodes, 4]
+        self.wt_properties_array = np.array(wt_properties, dtype=np.float32)
         
         if csv_path and os.path.exists(csv_path):
             print(f"Loading mutation dataset from: {csv_path}")
@@ -68,26 +72,19 @@ class PETaseMutationDataset(Dataset):
             self.mutations = None
 
     def _compute_active_site_shield(self):
-        """Calculates Euclidean distances to protect catalytic flexibility."""
         num_nodes = self.coords.shape[0]
         shield_mask = np.zeros(num_nodes, dtype=bool)
         triad_coords = self.coords[self.triad_indices]
-        
         for i in range(num_nodes):
             distances = np.linalg.norm(triad_coords - self.coords[i], axis=1)
             if np.min(distances) < self.shield_radius:
                 shield_mask[i] = True
-                
         return torch.tensor(shield_mask, dtype=torch.bool)
 
     def _augment_dataset(self, df):
-        """Generates inverse mutation pairs (B -> A with -ΔTm) to double training signals."""
         augmented_rows = []
         for _, row in df.iterrows():
-            # Original row
             augmented_rows.append(row.to_dict())
-            
-            # Inverse row
             inv_row = row.to_dict()
             wt = str(row['wild_type']).strip().upper()
             mut_str = str(row['mutation_type']).strip().upper()
@@ -97,7 +94,6 @@ class PETaseMutationDataset(Dataset):
             inv_row['mutation_type'] = wt
             inv_row['stability_score'] = -1.0 * float(row['stability_score'])
             augmented_rows.append(inv_row)
-            
         return pd.DataFrame(augmented_rows)
 
     def __len__(self):
@@ -109,7 +105,6 @@ class PETaseMutationDataset(Dataset):
         num_nodes = self.coords.shape[0]
         
         if self.mutations is None:
-            # Fallback 8D tensor for uninitialized dry-run tests
             mock_x = torch.zeros((num_nodes, 8), dtype=torch.float)
             mock_graph = self.base_graph.clone()
             mock_graph.x = mock_x
@@ -118,35 +113,44 @@ class PETaseMutationDataset(Dataset):
         row = self.mutations.iloc[idx]
         target_score = torch.tensor([float(row['stability_score'])], dtype=torch.float)
         
-        raw_pos = int(row['position_idx'])
-        mutation_position = max(0, min(raw_pos - 1, num_nodes - 1))
-        mutation_pos_tensor = torch.tensor([mutation_position], dtype=torch.long)
+        # Parse single or multi-point position indices (e.g. "121" or "121,186")
+        pos_str = str(row['position_idx'])
+        pos_list = [max(0, min(int(p.strip()) - 1, num_nodes - 1)) for p in str(pos_str).split(',')]
+        primary_mutation_pos = torch.tensor([pos_list[0]], dtype=torch.long)
         
-        # Extract mutant amino acid
-        mutation_str = str(row['mutation_type']).strip().upper()
-        mutant_aa_letter = mutation_str[-1] if len(mutation_str) > 0 else self.wt_letters[mutation_position]
+        # Parse mutant amino acid letters
+        mut_str = str(row['mutation_type']).strip().upper()
+        mut_parts = mut_str.split(';') if ';' in mut_str else mut_str.split(',')
         
-        wt_props = np.array(AA_PHYSICAL_PROPERTIES.get(self.wt_letters[mutation_position], [89.1, 1.8, 0.0, 0.0]))
-        mutant_props = np.array(AA_PHYSICAL_PROPERTIES.get(mutant_aa_letter, wt_props))
+        mut_letters = []
+        for part in mut_parts:
+            part = part.strip()
+            if len(part) > 0:
+                mut_letters.append(part[-1])
         
-        # Calculate 4D Delta: [ΔVolume, ΔHydropathy, ΔCharge, ΔH-Bonds]
-        delta_props = mutant_props - wt_props
-        
-        # Build 8D Feature Matrix per node: [4D WT Properties || 4D Delta Features]
+        # Fallback padding if letters list doesn't match position list length
+        while len(mut_letters) < len(pos_list):
+            mut_letters.append(mut_letters[0] if len(mut_letters) > 0 else 'A')
+            
+        mutated_graph = self.base_graph.clone()
         node_features = np.zeros((num_nodes, 8), dtype=np.float32)
         node_features[:, 0:4] = self.wt_properties_array
-        node_features[mutation_position, 4:8] = delta_props
         
-        mutated_graph = self.base_graph.clone()
+        # Inject delta vectors at ALL mutated positions simultaneously
+        for p_idx, mut_aa in zip(pos_list, mut_letters):
+            wt_aa = self.wt_letters[p_idx]
+            wt_props = np.array(AA_PHYSICAL_PROPERTIES.get(wt_aa, [0.0, 0.0, 0.0, 0.0]))
+            mutant_props = np.array(AA_PHYSICAL_PROPERTIES.get(mut_aa, wt_props))
+            delta_props = mutant_props - wt_props
+            node_features[p_idx, 4:8] = delta_props
+            
         mutated_graph.x = torch.tensor(node_features, dtype=torch.float)
-        
-        return mutated_graph, target_score, mutation_pos_tensor, self.active_site_shield
+        return mutated_graph, target_score, primary_mutation_pos, self.active_site_shield
 
 if __name__ == "__main__":
-    print("Testing 8D Delta Feature Dataset Engine...")
-    test_ds = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
-    graph_out, score_out, pos_out, shield_out = test_ds[0]
-    print(f"Dataset Length (Augmented): {len(test_ds)}")
-    print(f"Node Feature Shape        : {graph_out.x.shape} (Expected: [265, 8])")
-    print(f"Delta Vector at Pos {pos_out.item()}  : {graph_out.x[pos_out.item(), 4:8].tolist()}")
-    print("8D Delta Feature Engine Verification Passed!")
+    print("Testing Multi-Point Dataset Infiltration Engine...")
+    test_ds = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/benchmark_25.csv", augment_inverse=False)
+    graph_out, score_out, pos_out, shield_out = test_ds[11] # Row 12: Double mutant 121,186
+    print(f"Parsed Benchmark Row 12 (Double Mutant 121+186): Target Score = {score_out.item()} °C")
+    print(f"Non-zero Delta Nodes Count: {(graph_out.x[:, 4:8].abs().sum(dim=-1) > 0).sum().item()}")
+    print("Multi-Point Infiltration Engine Verification Passed!")

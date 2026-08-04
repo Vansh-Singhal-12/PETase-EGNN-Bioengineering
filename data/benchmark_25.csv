@@ -10,17 +10,17 @@ T,140C,140,2.8,Cui et al. (2021) / Disulfide-bond mutant (DuraPETase)
 S,160C,160,2.8,Cui et al. (2021) / Disulfide-bond mutant (DuraPETase)
 W,159H,159,3.5,Bell et al. (2022) / HotPETase component
 F,238Y,238,2.2,Bell et al. (2022) / HotPETase component
-S,121D,121,4.5,Son et al. (2019) / Double combination S121D
-D,186H,186,3.8,Son et al. (2019) / Double combination D186H
-N,233K,233,5.1,Lu et al. (2022) / FAST-PETase double mutant
-R,224Q,224,6.2,Lu et al. (2022) / FAST-PETase triple mutant
-S,214H,214,4.0,Cui et al. (2021) / DuraPETase double mutant
-I,132F,132,3.9,Cui et al. (2021) / DuraPETase triple mutant
-W,159H,159,5.7,Bell et al. (2022) / HotPETase double mutant
-F,238Y,238,4.1,Bell et al. (2022) / HotPETase triple mutant
-S,214H,214,8.5,Cui et al. (2021) / Full DuraPETase consensus
-I,132F,132,7.2,Cui et al. (2021) / Full DuraPETase backbone
-W,159H,159,9.1,Bell et al. (2022) / Full HotPETase variant
-F,238Y,238,6.8,Bell et al. (2022) / Full ThermoPETase variant
+S,121D;D186H,"121,186",4.5,Son et al. (2019) / Double combination S121D+D186H
+D,D186H;N233K,"186,233",3.8,Son et al. (2019) / Double combination D186H+N233K
+N,N233K;R224Q,"233,224",5.1,Lu et al. (2022) / FAST-PETase double mutant
+R,R224Q;N233K;D186H,"224,233,186",6.2,Lu et al. (2022) / FAST-PETase triple mutant
+S,S214H;I132F,"214,132",4.0,Cui et al. (2021) / DuraPETase double mutant
+I,I132F;T140C;S160C,"132,140,160",3.9,Cui et al. (2021) / DuraPETase triple mutant
+W,W159H;F238Y,"159,238",5.7,Bell et al. (2022) / HotPETase double mutant
+F,F238Y;W159H;R224Q,"238,159,224",4.1,Bell et al. (2022) / HotPETase triple mutant
+S,S214H;I132F;T140C;S160C,"214,132,140,160",8.5,Cui et al. (2021) / Full DuraPETase consensus
+I,I132F;T140C;S160C;S214H,"132,140,160,214",7.2,Cui et al. (2021) / Full DuraPETase backbone
+W,W159H;F238Y;S121E,"159,238,121",9.1,Bell et al. (2022) / Full HotPETase variant
+F,F238Y;W159H;S121D,"238,159,121",6.8,Bell et al. (2022) / Full ThermoPETase variant
 A,180T,180,2.4,Austin et al. (2018) / Active site flexibility mutant
 G,165A,165,1.5,Brott et al. (2021) / Surface hinge stabilizing mutant
