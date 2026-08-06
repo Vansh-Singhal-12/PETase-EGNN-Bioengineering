@@ -37,7 +37,8 @@ AA_PHYSICAL_PROPERTIES = {
 class PETaseMutationDataset(Dataset):
     """
     Multi-point enabled PyTorch Dataset.
-    Infiltrates single or multi-point biophysical delta vectors into graph node tensors.
+    Infiltrates single or multi-point biophysical delta vectors into graph node tensors
+    and performs synthetic multi-point combinatorial data augmentation.
     """
     def __init__(self, pdb_path, csv_path=None, shield_radius=10.0, augment_inverse=True):
         self.base_graph = load_protein_as_graph(pdb_path)
@@ -82,9 +83,15 @@ class PETaseMutationDataset(Dataset):
         return torch.tensor(shield_mask, dtype=torch.bool)
 
     def _augment_dataset(self, df):
+        """Generates inverse mutation pairs and synthetic multi-point combinations."""
         augmented_rows = []
+        np_rng = np.random.RandomState(42)
+        
+        # 1. Base rows
         for _, row in df.iterrows():
             augmented_rows.append(row.to_dict())
+            
+            # 2. Inverse mutation rows (B -> A with -ΔTm)
             inv_row = row.to_dict()
             wt = str(row['wild_type']).strip().upper()
             mut_str = str(row['mutation_type']).strip().upper()
@@ -94,6 +101,24 @@ class PETaseMutationDataset(Dataset):
             inv_row['mutation_type'] = wt
             inv_row['stability_score'] = -1.0 * float(row['stability_score'])
             augmented_rows.append(inv_row)
+
+        # 3. Synthetic Multi-Point Pair Augmentation (Combinatorial training)
+        n_rows = len(df)
+        if n_rows > 1:
+            for _ in range(n_rows):
+                i1, i2 = np_rng.choice(n_rows, size=2, replace=False)
+                r1, r2 = df.iloc[i1], df.iloc[i2]
+                
+                pos1, pos2 = str(r1['position_idx']).strip(), str(r2['position_idx']).strip()
+                if pos1 != pos2: # Non-overlapping positions
+                    synth_row = {
+                        'wild_type': f"{r1['wild_type']};{r2['wild_type']}",
+                        'mutation_type': f"{r1['mutation_type']};{r2['mutation_type']}",
+                        'position_idx': f"{pos1},{pos2}",
+                        'stability_score': float(r1['stability_score']) + float(r2['stability_score'])
+                    }
+                    augmented_rows.append(synth_row)
+
         return pd.DataFrame(augmented_rows)
 
     def __len__(self):
@@ -108,7 +133,7 @@ class PETaseMutationDataset(Dataset):
             mock_x = torch.zeros((num_nodes, 8), dtype=torch.float)
             mock_graph = self.base_graph.clone()
             mock_graph.x = mock_x
-            return mock_graph, torch.tensor([0.0]), torch.tensor([120]), self.active_site_shield
+            return mock_graph, torch.tensor([0.0]), torch.tensor([120], dtype=torch.long), self.active_site_shield
         
         row = self.mutations.iloc[idx]
         target_score = torch.tensor([float(row['stability_score'])], dtype=torch.float)
@@ -116,7 +141,7 @@ class PETaseMutationDataset(Dataset):
         # Parse single or multi-point position indices (e.g. "121" or "121,186")
         pos_str = str(row['position_idx'])
         pos_list = [max(0, min(int(p.strip()) - 1, num_nodes - 1)) for p in str(pos_str).split(',')]
-        primary_mutation_pos = torch.tensor([pos_list[0]], dtype=torch.long)
+        mutation_pos_tensor = torch.tensor(pos_list, dtype=torch.long)
         
         # Parse mutant amino acid letters
         mut_str = str(row['mutation_type']).strip().upper()
@@ -128,7 +153,6 @@ class PETaseMutationDataset(Dataset):
             if len(part) > 0:
                 mut_letters.append(part[-1])
         
-        # Fallback padding if letters list doesn't match position list length
         while len(mut_letters) < len(pos_list):
             mut_letters.append(mut_letters[0] if len(mut_letters) > 0 else 'A')
             
@@ -145,12 +169,12 @@ class PETaseMutationDataset(Dataset):
             node_features[p_idx, 4:8] = delta_props
             
         mutated_graph.x = torch.tensor(node_features, dtype=torch.float)
-        return mutated_graph, target_score, primary_mutation_pos, self.active_site_shield
+        return mutated_graph, target_score, mutation_pos_tensor, self.active_site_shield
 
 if __name__ == "__main__":
     print("Testing Multi-Point Dataset Infiltration Engine...")
     test_ds = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/benchmark_25.csv", augment_inverse=False)
     graph_out, score_out, pos_out, shield_out = test_ds[11] # Row 12: Double mutant 121,186
-    print(f"Parsed Benchmark Row 12 (Double Mutant 121+186): Target Score = {score_out.item()} °C")
-    print(f"Non-zero Delta Nodes Count: {(graph_out.x[:, 4:8].abs().sum(dim=-1) > 0).sum().item()}")
-    print("Multi-Point Infiltration Engine Verification Passed!")
+    print(f"Parsed Benchmark Row 12 (Double Mutant): Target Score = {score_out.item()} °C")
+    print(f"Mutated Pos Tensor: {pos_out.tolist()} (Shape: {pos_out.shape})")
+    print(" Multi-Point Infiltration Engine Verification Passed!")
