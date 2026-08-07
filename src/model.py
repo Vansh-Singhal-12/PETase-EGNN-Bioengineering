@@ -7,123 +7,105 @@ class EGNNLayer(MessagePassing):
     Stabilized Equivariant Graph Neural Network Layer.
     Updates amino acid features and 3D coordinates with damped spatial shifts.
     """
-    def __init__(self, emb_dim, coord_scale=0.1):
-        super(EGNNLayer, self).__init__(aggr="sum")
+    def __init__(self, emb_dim=32, coord_scale=0.1):
+        super(EGNNLayer, self).__init__(aggr='add')
         self.coord_scale = coord_scale
-        
-        # Edge network
         self.edge_mlp = nn.Sequential(
             nn.Linear(emb_dim * 2 + 1, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, emb_dim)
         )
-        
-        # Node network
-        self.node_mlp = nn.Sequential(
-            nn.Linear(emb_dim + emb_dim, emb_dim),
-            nn.SiLU(),
-            nn.Linear(emb_dim, emb_dim)
-        )
-        
-        # Coordinate network
         self.coord_mlp = nn.Sequential(
             nn.Linear(emb_dim, emb_dim),
             nn.SiLU(),
             nn.Linear(emb_dim, 1),
-            nn.Tanh() # Bounded spatial shifts
+            nn.Tanh()
+        )
+        self.node_mlp = nn.Sequential(
+            nn.Linear(emb_dim * 2, emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, emb_dim)
         )
 
     def forward(self, h, pos, edge_index):
         return self.propagate(edge_index, h=h, pos=pos)
 
     def message(self, h_i, h_j, pos_i, pos_j):
-        coord_diff = pos_i - pos_j
-        sq_dist = torch.sum(coord_diff ** 2, dim=-1, keepdim=True)
-        
-        edge_input = torch.cat([h_i, h_j, sq_dist], dim=-1)
-        msg = self.edge_mlp(edge_input)
-        
-        coord_weight = self.coord_mlp(msg)
-        coord_msg = coord_diff * coord_weight * self.coord_scale
-        
-        return msg, coord_msg
+        rel_pos = pos_i - pos_j
+        dist_sq = torch.sum(rel_pos ** 2, dim=-1, keepdim=True)
+        edge_feat = torch.cat([h_i, h_j, dist_sq], dim=-1)
+        m_ij = self.edge_mlp(edge_feat)
+        return m_ij
 
-    def aggregate(self, inputs, index, dim_size=None):
-        node_msg, coord_msg = inputs
-        agg_node_msg = super().aggregate(node_msg, index, dim_size=dim_size)
-        agg_coord_msg = super().aggregate(coord_msg, index, dim_size=dim_size)
-        return agg_node_msg, agg_coord_msg
-
-    def update(self, aggr_out, h, pos):
-        agg_node_msg, agg_coord_msg = aggr_out
-        node_input = torch.cat([h, agg_node_msg], dim=-1)
+    def update(self, aggr_out, h, pos, edge_index):
+        # Invariant Node State Update with Residual Skip Connection
+        h_new = h + self.node_mlp(torch.cat([h, aggr_out], dim=-1))
         
-        # Residual connection
-        h_new = h + self.node_mlp(node_input)
-        pos_new = pos + agg_coord_msg
+        # Equivariant Spatial Coordinate Update with Smooth Gaussian RBF Weighting
+        row, col = edge_index
+        rel_pos = pos[row] - pos[col]
+        dist_sq = torch.sum(rel_pos ** 2, dim=-1, keepdim=True)
+        m_ij = self.edge_mlp(torch.cat([h[row], h[col], dist_sq], dim=-1))
+        coord_weights = self.coord_mlp(m_ij)
         
+        rbf_weight = torch.exp(-0.5 * (torch.sqrt(dist_sq + 1e-8) / 10.0) ** 2)
+        delta_pos = torch.zeros_like(pos)
+        delta_pos.index_add_(0, row, rel_pos * coord_weights * rbf_weight * self.coord_scale)
+        
+        pos_new = pos + delta_pos
         return h_new, pos_new
 
 
 class PETaseStabilityEGNN(nn.Module):
-    """
-    Multi-Node Enabled EGNN Model.
-    Averages embeddings across ALL mutated nodes in multi-point variants,
-    concatenating with 10Å spatial neighborhood context into a 64D regression head.
-    """
-    def __init__(self, num_amino_acids=8, emb_dim=32, radius=10.0):
+    def __init__(self, in_dim=8, emb_dim=32, dropout=0.2):
         super(PETaseStabilityEGNN, self).__init__()
-        self.radius = radius
+        self.embedding = nn.Linear(in_dim, emb_dim)
+        self.layer1 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
+        self.layer2 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
         
-        self.embedding = nn.Linear(num_amino_acids, emb_dim)
+        self.dropout = nn.Dropout(p=dropout)
         
-        self.egnn_layer1 = EGNNLayer(emb_dim)
-        self.egnn_layer2 = EGNNLayer(emb_dim)
+        # Node-level readout head for Active Site Shield destabilization tracking
+        self.node_readout = nn.Linear(emb_dim, 1)
         
+        # 64D dual-tensor regression head (32D sum-pooled mutated node + 32D 10A spatial context)
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim * 2, emb_dim),
             nn.SiLU(),
+            nn.Dropout(p=dropout),
             nn.Linear(emb_dim, 1)
         )
 
-    def forward(self, data, mutation_pos):
-        h = self.embedding(data.x.float()) # [N, 32]
-        pos = data.pos                     # [N, 3]
-        edge_index = data.edge_index       # [2, E]
-        
-        # Run through E(3)-equivariant message-passing layers
-        h, pos = self.egnn_layer1(h, pos, edge_index)
-        h, pos = self.egnn_layer2(h, pos, edge_index)
-        
-        # 1. Multi-Node Direct Feature Infiltration (Pools across ALL mutated nodes in mutation_pos)
-        mutated_nodes_h = h[mutation_pos].mean(dim=0).view(-1) # [32]
-        
-        # 2. Smooth Gaussian 10Å Spatial Neighborhood Context around mutated center
-        mut_coord = pos[mutation_pos].mean(dim=0).view(-1) # [3]
-        distances = torch.norm(pos - mut_coord, dim=-1)
-        weights = torch.exp(-0.5 * (distances / self.radius) ** 2).unsqueeze(-1) # [N, 1]
-        pooled_h = ((h * weights).sum(dim=0) / (weights.sum(dim=0) + 1e-8)).view(-1) # [32]
-        
-        # 3. Concatenate Multi-Node Direct Signal + Spatial Context (64D)
-        combined_representation = torch.cat([mutated_nodes_h, pooled_h], dim=-1) # [64]
-        
-        out = self.regression_head(combined_representation)
-        return out.squeeze(-1)
+    def forward(self, graph_data, mutation_pos):
+        h = self.embedding(graph_data.x.float())
+        pos = graph_data.pos.float()
+        edge_index = graph_data.edge_index
 
+        h, pos = self.layer1(h, pos, edge_index)
+        h, pos = self.layer2(h, pos, edge_index)
 
-if __name__ == "__main__":
-    print("Testing Multi-Node EGNN Model Compilation...")
-    try:
-        from torch_geometric.data import Data
-        mock_data = Data(
-            x=torch.randn(265, 8),
-            pos=torch.randn(265, 3),
-            edge_index=torch.tensor([[0, 1], [1, 0]], dtype=torch.long)
-        )
-        model = PETaseStabilityEGNN(num_amino_acids=8, emb_dim=32, radius=10.0)
-        out = model(mock_data, torch.tensor([120, 185], dtype=torch.long))
-        print(model)
-        print(f"\nTest prediction output shape: {out.shape}")
-        print(" Multi-Node EGNN Model Compiled Successfully!")
-    except Exception as e:
-        print(f"\n Compilation Error: {str(e)}")
+        # Per-node stability predictions for Active Site Shield loss evaluation
+        node_preds = self.node_readout(h).view(-1)
+
+        # Handle single-point or multi-point mutation position inputs
+        if isinstance(mutation_pos, (list, tuple, torch.Tensor)):
+            pos_list = torch.tensor(mutation_pos, dtype=torch.long, device=h.device) if not isinstance(mutation_pos, torch.Tensor) else mutation_pos.long()
+        else:
+            pos_list = torch.tensor([mutation_pos], dtype=torch.long, device=h.device)
+
+        # SUM-POOLED FEATURE VECTOR: Accumulates multi-point signals cleanly
+        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]
+
+        # 10A Gaussian RBF spatial neighborhood pooling
+        mutated_coords = pos[pos_list]
+        dist_matrix = torch.cdist(pos, mutated_coords)
+        min_dists, _ = torch.min(dist_matrix, dim=-1)
+        
+        rbf_weights = torch.exp(-0.5 * (min_dists / 10.0) ** 2).unsqueeze(-1)
+        pooled_h = (h * rbf_weights).sum(dim=0, keepdim=True) / (rbf_weights.sum() + 1e-8)
+
+        combined_h = torch.cat([mutated_node_h, pooled_h], dim=-1)  # Shape: [1, 64]
+        combined_h = self.dropout(combined_h)
+
+        prediction = self.regression_head(combined_h)
+        return prediction.view(-1), node_preds
