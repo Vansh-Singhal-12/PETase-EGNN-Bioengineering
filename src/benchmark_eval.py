@@ -49,12 +49,12 @@ def run_benchmark():
     preds_arr = np.array(all_preds)
     targets_arr = np.array(all_targets)
     
-    # 1. Raw Unscaled R^2 Calculation
+    # Raw R^2 Calculation against physical °C values
     ss_res = np.sum((targets_arr - preds_arr) ** 2)
     ss_tot = np.sum((targets_arr - np.mean(targets_arr)) ** 2)
     r2_raw = 1.0 - (ss_res / (ss_tot + 1e-8))
     
-    # 2. Optimal Linear Calibration Fit (y_calibrated = m * pred + b)
+    # Optimal Linear Calibration Fit
     slope, intercept = np.polyfit(preds_arr, targets_arr, 1)
     calibrated_preds = slope * preds_arr + intercept
     ss_res_cal = np.sum((targets_arr - calibrated_preds) ** 2)

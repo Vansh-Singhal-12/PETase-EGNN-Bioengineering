@@ -60,7 +60,7 @@ class PETaseStabilityEGNN(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.node_readout = nn.Linear(emb_dim, 1)
         
-        # 64D dual-tensor regression head with tuned p=0.1 dropout
+        # 64D dual-tensor regression head
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim * 2, emb_dim),
             nn.SiLU(),
@@ -77,11 +77,15 @@ class PETaseStabilityEGNN(nn.Module):
         h, pos = self.layer2(h, pos, edge_index)
 
         node_preds = self.node_readout(h).view(-1)
+        num_nodes = h.size(0)  # 265 nodes
 
         if isinstance(mutation_pos, (list, tuple, torch.Tensor)):
             pos_list = torch.tensor(mutation_pos, dtype=torch.long, device=h.device) if not isinstance(mutation_pos, torch.Tensor) else mutation_pos.long()
         else:
             pos_list = torch.tensor([mutation_pos], dtype=torch.long, device=h.device)
+
+        # Safety Index Clamping: Guarantees pos_list is strictly within [0, num_nodes - 1]
+        pos_list = torch.clamp(pos_list, 0, num_nodes - 1)
 
         # SUM-POOLED FEATURE VECTOR
         mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]

@@ -1,180 +1,209 @@
 import os
 import torch
-import pandas as pd
 import numpy as np
-from torch.utils.data import Dataset
-from src.data_loader import load_protein_as_graph
+import pandas as pd
+from torch_geometric.data import Data
+from Bio.PDB import PDBParser
 
-AA_PHYSICAL_PROPERTIES_RAW = {
-    'A': [89.1, 1.8, 0.0, 0.0],   'R': [174.2, -4.5, 1.0, 4.0],
-    'N': [132.1, -3.5, 0.0, 4.0],  'D': [133.1, -3.5, -1.0, 4.0],
-    'C': [121.2, 2.5, 0.0, 1.0],   'Q': [146.2, -3.5, 0.0, 4.0],
-    'E': [147.1, -3.5, -1.0, 4.0], 'G': [75.1, -0.4, 0.0, 0.0],
-    'H': [155.2, -3.2, 0.1, 2.0],  'I': [131.2, 4.5, 0.0, 0.0],
-    'L': [131.2, 3.8, 0.0, 0.0],   'K': [146.2, -3.9, 1.0, 2.0],
-    'M': [149.2, 1.9, 0.0, 0.0],   'F': [165.2, 2.8, 0.0, 0.0],
-    'P': [115.1, -1.6, 0.0, 0.0],  'S': [105.1, -0.8, 0.0, 2.0],
-    'T': [119.1, -0.7, 0.0, 2.0],  'W': [204.2, -0.9, 0.0, 2.0],
-    'Y': [181.2, -1.3, 0.0, 3.0],  'V': [117.1, 4.2, 0.0, 0.0]
+# IUPAC standard 20 amino acid mapping
+AA_TO_INT = {
+    'A': 0, 'R': 1, 'N': 2, 'D': 3, 'C': 4, 'E': 5, 'Q': 6, 'G': 7,
+    'H': 8, 'I': 9, 'L': 10, 'K': 11, 'M': 12, 'F': 13, 'P': 14, 'S': 15,
+    'T': 16, 'W': 17, 'Y': 18, 'V': 19
 }
 
-INT_TO_AA = {
-    0: 'A', 1: 'R', 2: 'N', 3: 'D', 4: 'C', 5: 'Q', 6: 'E', 7: 'G', 8: 'H',
-    9: 'I', 10: 'L', 11: 'K', 12: 'M', 13: 'F', 14: 'P', 15: 'S', 16: 'T',
-    17: 'W', 18: 'Y', 19: 'V'
+# 4D Biophysical Properties Table [Volume (Da), Hydropathy, Charge, H-Bonds]
+AA_PROPERTIES = {
+    'A': [89.1, 1.8, 0, 0], 'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
+    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0], 'E': [147.1, -3.5, -1, 2],
+    'Q': [146.1, -3.5, 0, 2], 'G': [75.1, -0.4, 0, 0], 'H': [155.2, -3.2, 0.5, 2],
+    'I': [131.2, 4.5, 0, 0], 'L': [131.2, 3.8, 0, 0], 'K': [146.2, -3.9, 1, 2],
+    'M': [149.2, 1.9, 0, 0], 'F': [165.2, 2.8, 0, 0], 'P': [115.1, -1.6, 0, 0],
+    'S': [105.1, -0.8, 0, 1], 'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
+    'Y': [181.2, -1.3, 0, 1], 'V': [117.1, 4.2, 0, 0]
 }
 
-raw_matrix = np.array(list(AA_PHYSICAL_PROPERTIES_RAW.values()), dtype=np.float32)
-AA_MEAN = raw_matrix.mean(axis=0)
-AA_STD = raw_matrix.std(axis=0)
-AA_STD[AA_STD == 0] = 1.0
-
-AA_PHYSICAL_PROPERTIES = {
-    k: ((np.array(v, dtype=np.float32) - AA_MEAN) / AA_STD).tolist()
-    for k, v in AA_PHYSICAL_PROPERTIES_RAW.items()
+# Z-score normalize 4D property vectors
+props_matrix = np.array(list(AA_PROPERTIES.values()))
+props_mean = props_matrix.mean(axis=0)
+props_std = props_matrix.std(axis=0) + 1e-8
+AA_PROPERTIES_NORM = {
+    aa: ((np.array(props) - props_mean) / props_std).tolist()
+    for aa, props in AA_PROPERTIES.items()
 }
 
-class PETaseMutationDataset(Dataset):
-    """
-    Multi-point enabled PyTorch Dataset.
-    Infiltrates single or multi-point biophysical delta vectors into graph node tensors
-    and performs synthetic multi-point combinatorial data augmentation.
-    """
-    def __init__(self, pdb_path, csv_path=None, shield_radius=10.0, augment_inverse=True):
-        self.base_graph = load_protein_as_graph(pdb_path)
-        self.shield_radius = shield_radius
+class PETaseMutationDataset:
+    def __init__(self, pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True):
+        self.pdb_path = pdb_path
+        self.csv_path = csv_path
         self.augment_inverse = augment_inverse
         
-        self.coords = self.base_graph.pos.numpy()
-        num_nodes = self.coords.shape[0]
+        self.base_graph = self._load_protein_as_graph(pdb_path)
+        self.num_nodes = self.base_graph.x.size(0)  # 265 nodes
+        self.df = pd.read_csv(csv_path)
         
-        self.triad_indices = [max(0, min(idx - 1, num_nodes - 1)) for idx in [120, 177, 208]]
-        self.active_site_shield = self._compute_active_site_shield()
+        self.items = self._build_dataset_items()
         
-        self.wt_letters = []
-        wt_properties = []
-        for i in range(num_nodes):
-            aa_id = int(self.base_graph.x[i].item()) if self.base_graph.x[i].dim() == 0 else int(self.base_graph.x[i][0].item())
-            aa_letter = INT_TO_AA.get(aa_id, 'A')
-            self.wt_letters.append(aa_letter)
-            wt_properties.append(AA_PHYSICAL_PROPERTIES[aa_letter])
+    def _load_protein_as_graph(self, pdb_path):
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("PETase", pdb_path)
+        
+        coords = []
+        res_names = []
+        for model in structure:
+            for chain in model:
+                for residue in chain:
+                    if residue.has_id("CA"):
+                        coords.append(residue["CA"].get_coord())
+                        res_names.append(residue.get_resname())
+                        
+        coords = np.array(coords)
+        num_nodes = len(coords)
+        
+        # Build Euclidean distance graph (cutoff d <= 8.0 A)
+        dist_matrix = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+        edge_indices = np.where((dist_matrix <= 8.0) & (dist_matrix > 0))
+        # Fixed PyTorch warning by converting tuple of ndarrays to single numpy array
+        edge_index = torch.tensor(np.array(edge_indices), dtype=torch.long)
+        
+        # Construct Z-score normalized 8D continuous node features [WT || Delta]
+        x_feat = []
+        for resname in res_names:
+            try:
+                from Bio.PDB.Polypeptide import three_to_one
+                one_letter = three_to_one(resname)
+            except:
+                one_letter = 'A'
+            wt_props = AA_PROPERTIES_NORM.get(one_letter, [0.0, 0.0, 0.0, 0.0])
+            x_feat.append(wt_props + [0.0, 0.0, 0.0, 0.0])
             
-        self.wt_properties_array = np.array(wt_properties, dtype=np.float32)
+        x_tensor = torch.tensor(x_feat, dtype=torch.float)
+        pos_tensor = torch.tensor(coords, dtype=torch.float)
         
-        if csv_path and os.path.exists(csv_path):
-            print(f"Loading mutation dataset from: {csv_path}")
-            raw_df = pd.read_csv(csv_path)
-            if self.augment_inverse:
-                self.mutations = self._augment_dataset(raw_df)
-                print(f"[Data Augmentation] Base rows: {len(raw_df)} -> Augmented rows: {len(self.mutations)}")
+        # 10.0 A Active Site Shield mask around catalytic triad (Ser120, Asp177, His208)
+        catalytic_indices = [120, 177, 208]
+        valid_cat_indices = [idx for idx in catalytic_indices if idx < num_nodes]
+        
+        cat_coords = coords[valid_cat_indices]
+        dists_to_cat = np.linalg.norm(coords[:, None, :] - cat_coords[None, :, :], axis=-1)
+        min_cat_dists = dists_to_cat.min(axis=-1)
+        
+        active_site_shield = torch.tensor(min_cat_dists <= 10.0, dtype=torch.bool)
+        
+        graph = Data(x=x_tensor, pos=pos_tensor, edge_index=edge_index)
+        graph.active_site_shield = active_site_shield
+        return graph
+
+    def _map_pos_to_node_idx(self, p):
+        p = int(p)
+        # Convert raw PDB residue numbers (>= 265) to 0-indexed node indices (31-295 -> 0-264)
+        if p >= self.num_nodes:
+            if p >= 31:
+                p = p - 31
             else:
-                self.mutations = raw_df
+                p = p % self.num_nodes
+        return max(0, min(p, self.num_nodes - 1))
+
+    def _parse_pos_string(self, pos_str):
+        if isinstance(pos_str, (int, np.integer)):
+            raw_list = [int(pos_str)]
+        elif isinstance(pos_str, str):
+            parts = pos_str.replace('[', '').replace(']', '').split(',')
+            raw_list = [int(p.strip()) for p in parts if p.strip()]
+        elif isinstance(pos_str, (list, tuple)):
+            raw_list = [int(p) for p in pos_str]
         else:
-            self.mutations = None
+            raw_list = [0]
+            
+        return [self._map_pos_to_node_idx(p) for p in raw_list]
 
-    def _compute_active_site_shield(self):
-        num_nodes = self.coords.shape[0]
-        shield_mask = np.zeros(num_nodes, dtype=bool)
-        triad_coords = self.coords[self.triad_indices]
-        for i in range(num_nodes):
-            distances = np.linalg.norm(triad_coords - self.coords[i], axis=1)
-            if np.min(distances) < self.shield_radius:
-                shield_mask[i] = True
-        return torch.tensor(shield_mask, dtype=torch.bool)
-
-    def _augment_dataset(self, df):
-        """Generates inverse mutation pairs and synthetic multi-point combinations."""
-        augmented_rows = []
-        np_rng = np.random.RandomState(42)
+    def _build_dataset_items(self):
+        items = []
+        raw_rows = []
         
-        # 1. Base rows
-        for _, row in df.iterrows():
-            augmented_rows.append(row.to_dict())
+        for idx, row in self.df.iterrows():
+            pos_list = self._parse_pos_string(row['position_idx'])
+            score = float(row['stability_score'])
+            mut_type = str(row.get('mutation_type', 'A'))
+            wt_type = str(row.get('wild_type', 'A'))
             
-            # 2. Inverse mutation rows (B -> A with -ΔTm)
-            inv_row = row.to_dict()
-            wt = str(row['wild_type']).strip().upper()
-            mut_str = str(row['mutation_type']).strip().upper()
-            mut = mut_str[-1] if len(mut_str) > 0 else wt
+            raw_rows.append({
+                'pos_list': pos_list,
+                'score': score,
+                'mut_type': mut_type,
+                'wt_type': wt_type
+            })
+            items.append((pos_list, score, mut_type, wt_type, False))
             
-            inv_row['wild_type'] = mut
-            inv_row['mutation_type'] = wt
-            inv_row['stability_score'] = -1.0 * float(row['stability_score'])
-            augmented_rows.append(inv_row)
-
-        # 3. Synthetic Multi-Point Pair Augmentation (Combinatorial training)
-        n_rows = len(df)
-        if n_rows > 1:
-            for _ in range(n_rows):
-                i1, i2 = np_rng.choice(n_rows, size=2, replace=False)
-                r1, r2 = df.iloc[i1], df.iloc[i2]
+        if self.augment_inverse:
+            # 1. Inverse single mutations (B -> A with -Delta T_m)
+            for r in raw_rows:
+                items.append((r['pos_list'], -r['score'], r['wt_type'], r['mut_type'], True))
                 
-                pos1, pos2 = str(r1['position_idx']).strip(), str(r2['position_idx']).strip()
-                if pos1 != pos2: # Non-overlapping positions
-                    synth_row = {
-                        'wild_type': f"{r1['wild_type']};{r2['wild_type']}",
-                        'mutation_type': f"{r1['mutation_type']};{r2['mutation_type']}",
-                        'position_idx': f"{pos1},{pos2}",
-                        'stability_score': float(r1['stability_score']) + float(r2['stability_score'])
-                    }
-                    augmented_rows.append(synth_row)
+            num_raw = len(raw_rows)
+            # 2. Synthetic 2-point combinations
+            for i in range(num_raw):
+                r1 = raw_rows[i]
+                r2 = raw_rows[(i + 17) % num_raw]
+                comb_pos = list(set(r1['pos_list'] + r2['pos_list']))
+                comb_score = r1['score'] + r2['score']
+                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-        return pd.DataFrame(augmented_rows)
+            # 3. Synthetic 3-point combinations
+            for i in range(num_raw):
+                r1 = raw_rows[i]
+                r2 = raw_rows[(i + 11) % num_raw]
+                r3 = raw_rows[(i + 23) % num_raw]
+                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list']))
+                comb_score = r1['score'] + r2['score'] + r3['score']
+                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
+
+            # 4. Synthetic 4-point combinations (matches DuraPETase / HotPETase)
+            for i in range(num_raw):
+                r1 = raw_rows[i]
+                r2 = raw_rows[(i + 7) % num_raw]
+                r3 = raw_rows[(i + 19) % num_raw]
+                r4 = raw_rows[(i + 31) % num_raw]
+                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list']))
+                comb_score = r1['score'] + r2['score'] + r3['score'] + r4['score']
+                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
+
+            # 5. Synthetic 5-point combinations (matches FAST-PETase 5-mutation scaffold!)
+            for i in range(num_raw):
+                r1 = raw_rows[i]
+                r2 = raw_rows[(i + 5) % num_raw]
+                r3 = raw_rows[(i + 13) % num_raw]
+                r4 = raw_rows[(i + 29) % num_raw]
+                r5 = raw_rows[(i + 37) % num_raw]
+                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list'] + r5['pos_list']))
+                comb_score = r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']
+                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
+
+        return items
 
     def __len__(self):
-        if self.mutations is None:
-            return 1
-        return len(self.mutations)
+        return len(self.items)
 
     def __getitem__(self, idx):
-        num_nodes = self.coords.shape[0]
+        pos_list, score, mut_type, wt_type, is_inverse = self.items[idx]
         
-        if self.mutations is None:
-            mock_x = torch.zeros((num_nodes, 8), dtype=torch.float)
-            mock_graph = self.base_graph.clone()
-            mock_graph.x = mock_x
-            return mock_graph, torch.tensor([0.0]), torch.tensor([120], dtype=torch.long), self.active_site_shield
+        graph = self.base_graph.clone()
         
-        row = self.mutations.iloc[idx]
-        target_score = torch.tensor([float(row['stability_score'])], dtype=torch.float)
+        m_code = mut_type[0] if len(mut_type) > 0 else 'A'
+        w_code = wt_type[0] if len(wt_type) > 0 else 'A'
+            
+        m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0]))
+        w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0]))
         
-        # Parse single or multi-point position indices (e.g. "121" or "121,186")
-        pos_str = str(row['position_idx'])
-        pos_list = [max(0, min(int(p.strip()) - 1, num_nodes - 1)) for p in str(pos_str).split(',')]
+        delta_props = (m_props - w_props).tolist()
+        
+        num_nodes = graph.x.size(0)
+        for p in pos_list:
+            if p < num_nodes:
+                graph.x[p, 4:] = torch.tensor(delta_props, dtype=torch.float)
+                
+        target_tensor = torch.tensor([score], dtype=torch.float)
         mutation_pos_tensor = torch.tensor(pos_list, dtype=torch.long)
+        shield_mask = graph.active_site_shield
         
-        # Parse mutant amino acid letters
-        mut_str = str(row['mutation_type']).strip().upper()
-        mut_parts = mut_str.split(';') if ';' in mut_str else mut_str.split(',')
-        
-        mut_letters = []
-        for part in mut_parts:
-            part = part.strip()
-            if len(part) > 0:
-                mut_letters.append(part[-1])
-        
-        while len(mut_letters) < len(pos_list):
-            mut_letters.append(mut_letters[0] if len(mut_letters) > 0 else 'A')
-            
-        mutated_graph = self.base_graph.clone()
-        node_features = np.zeros((num_nodes, 8), dtype=np.float32)
-        node_features[:, 0:4] = self.wt_properties_array
-        
-        # Inject delta vectors at ALL mutated positions simultaneously
-        for p_idx, mut_aa in zip(pos_list, mut_letters):
-            wt_aa = self.wt_letters[p_idx]
-            wt_props = np.array(AA_PHYSICAL_PROPERTIES.get(wt_aa, [0.0, 0.0, 0.0, 0.0]))
-            mutant_props = np.array(AA_PHYSICAL_PROPERTIES.get(mut_aa, wt_props))
-            delta_props = mutant_props - wt_props
-            node_features[p_idx, 4:8] = delta_props
-            
-        mutated_graph.x = torch.tensor(node_features, dtype=torch.float)
-        return mutated_graph, target_score, mutation_pos_tensor, self.active_site_shield
-
-if __name__ == "__main__":
-    print("Testing Multi-Point Dataset Infiltration Engine...")
-    test_ds = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/benchmark_25.csv", augment_inverse=False)
-    graph_out, score_out, pos_out, shield_out = test_ds[11] # Row 12: Double mutant 121,186
-    print(f"Parsed Benchmark Row 12 (Double Mutant): Target Score = {score_out.item()} °C")
-    print(f"Mutated Pos Tensor: {pos_out.tolist()} (Shape: {pos_out.shape})")
-    print(" Multi-Point Infiltration Engine Verification Passed!")
+        return graph, target_tensor, mutation_pos_tensor, shield_mask

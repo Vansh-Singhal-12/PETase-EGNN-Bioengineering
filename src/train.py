@@ -31,10 +31,8 @@ def custom_collate(batch):
 
 
 def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0.02, beta=0.05, margin=0.2):
-    # 1. Scale-anchoring MSE Loss on raw °C targets (Primary Loss)
     mse_loss = nn.MSELoss()(preds, targets)
     
-    # 2. Pairwise Margin Ranking Loss (re-weighted to alpha=0.02 to prevent scale suppression)
     n = preds.size(0)
     if n > 1:
         preds_diff = preds.unsqueeze(1) - preds.unsqueeze(0)
@@ -47,7 +45,6 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
     else:
         pairwise_loss = torch.tensor(0.0, device=preds.device)
         
-    # 3. Active Site Shield Penalty
     shield_penalties = []
     for node_preds, mask in zip(node_preds_list, shield_masks):
         if mask is not None and mask.sum() > 0:
@@ -64,7 +61,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up Scale-Anchored EGNN Training Loop (alpha=0.02, raw °C targets)...")
+    print("Setting up EGNN Multi-Point Training Loop (924 Augmented Samples)...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
