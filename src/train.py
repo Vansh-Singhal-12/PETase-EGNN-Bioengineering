@@ -11,7 +11,7 @@ from scipy.stats import spearmanr, pearsonr
 from src.dataset import PETaseMutationDataset
 from src.model import PETaseStabilityEGNN
 
-# 1. Deterministic Seeding & Backend Lock across PyTorch, NumPy, Python, and cuDNN
+# Deterministic Seeding & Backend Lock
 RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -23,19 +23,18 @@ if torch.cuda.is_available():
 
 
 def custom_collate(batch):
-    # Custom batch collator: flattens target_scores to 1D to match prediction tensor shape
     graph_datas = [item[0] for item in batch]
-    target_scores = torch.stack([item[1] for item in batch], dim=0).view(-1)  # Shape: [batch_size]
+    target_scores = torch.stack([item[1] for item in batch], dim=0).view(-1)
     mutation_poses = [item[2] for item in batch]
     shield_masks = [item[3] for item in batch]
     return graph_datas, target_scores, mutation_poses, shield_masks
 
 
-def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0.1, beta=0.05, margin=0.2):
-    # 1. Scale-anchoring MSE Loss (both 1D tensors of shape [batch_size])
+def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0.02, beta=0.05, margin=0.2):
+    # 1. Scale-anchoring MSE Loss on raw °C targets (Primary Loss)
     mse_loss = nn.MSELoss()(preds, targets)
     
-    # 2. Pairwise Margin Ranking Loss across mini-batch
+    # 2. Pairwise Margin Ranking Loss (re-weighted to alpha=0.02 to prevent scale suppression)
     n = preds.size(0)
     if n > 1:
         preds_diff = preds.unsqueeze(1) - preds.unsqueeze(0)
@@ -48,7 +47,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
     else:
         pairwise_loss = torch.tensor(0.0, device=preds.device)
         
-    # 3. Active Site Shield Penalty (penalizes destabilization on Ser120, Asp177, His208)
+    # 3. Active Site Shield Penalty
     shield_penalties = []
     for node_preds, mask in zip(node_preds_list, shield_masks):
         if mask is not None and mask.sum() > 0:
@@ -65,7 +64,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up Mini-Batched EGNN Training Loop with Composite Margin Loss, Active Site Shield & Deterministic Lock...")
+    print("Setting up Scale-Anchored EGNN Training Loop (alpha=0.02, raw °C targets)...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
@@ -74,7 +73,7 @@ def run_training():
     loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=custom_collate)
     print(f"Batch Size: 16 | Total Batches per Epoch: {len(loader)}")
     
-    model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.2)
+    model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
     optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
     scheduler = CosineAnnealingLR(optimizer, T_max=200, eta_min=1e-6)
     
@@ -90,26 +89,24 @@ def run_training():
             optimizer.zero_grad()
             
             graph_datas, target_scores, mutation_poses, shield_masks = batch
-            target_scaled = target_scores / 10.0
             
             preds_list = []
             node_preds_list = []
             
-            # Forward pass over items in mini-batch
             for graph_data, pos in zip(graph_datas, mutation_poses):
                 p, np_pred = model(graph_data, pos)
                 preds_list.append(p)
                 node_preds_list.append(np_pred)
                 
-            preds = torch.cat(preds_list, dim=0)  # Shape: [batch_size]
+            preds = torch.cat(preds_list, dim=0)
             
-            loss = custom_composite_loss(preds, target_scaled, node_preds_list, shield_masks, alpha=0.1, beta=0.05)
+            loss = custom_composite_loss(preds, target_scores, node_preds_list, shield_masks, alpha=0.02, beta=0.05)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             total_loss += loss.item()
-            all_preds.extend((preds * 10.0).detach().cpu().numpy())
+            all_preds.extend(preds.detach().cpu().numpy())
             all_targets.extend(target_scores.detach().cpu().numpy())
             
         scheduler.step()

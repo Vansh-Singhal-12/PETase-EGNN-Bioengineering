@@ -3,10 +3,6 @@ import torch.nn as nn
 from torch_geometric.nn import MessagePassing
 
 class EGNNLayer(MessagePassing):
-    """
-    Stabilized Equivariant Graph Neural Network Layer.
-    Updates amino acid features and 3D coordinates with damped spatial shifts.
-    """
     def __init__(self, emb_dim=32, coord_scale=0.1):
         super(EGNNLayer, self).__init__(aggr='add')
         self.coord_scale = coord_scale
@@ -38,10 +34,8 @@ class EGNNLayer(MessagePassing):
         return m_ij
 
     def update(self, aggr_out, h, pos, edge_index):
-        # Invariant Node State Update with Residual Skip Connection
         h_new = h + self.node_mlp(torch.cat([h, aggr_out], dim=-1))
         
-        # Equivariant Spatial Coordinate Update with Smooth Gaussian RBF Weighting
         row, col = edge_index
         rel_pos = pos[row] - pos[col]
         dist_sq = torch.sum(rel_pos ** 2, dim=-1, keepdim=True)
@@ -57,18 +51,16 @@ class EGNNLayer(MessagePassing):
 
 
 class PETaseStabilityEGNN(nn.Module):
-    def __init__(self, in_dim=8, emb_dim=32, dropout=0.2):
+    def __init__(self, in_dim=8, emb_dim=32, dropout=0.1):
         super(PETaseStabilityEGNN, self).__init__()
         self.embedding = nn.Linear(in_dim, emb_dim)
         self.layer1 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
         self.layer2 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
         
         self.dropout = nn.Dropout(p=dropout)
-        
-        # Node-level readout head for Active Site Shield destabilization tracking
         self.node_readout = nn.Linear(emb_dim, 1)
         
-        # 64D dual-tensor regression head (32D sum-pooled mutated node + 32D 10A spatial context)
+        # 64D dual-tensor regression head with tuned p=0.1 dropout
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim * 2, emb_dim),
             nn.SiLU(),
@@ -84,16 +76,14 @@ class PETaseStabilityEGNN(nn.Module):
         h, pos = self.layer1(h, pos, edge_index)
         h, pos = self.layer2(h, pos, edge_index)
 
-        # Per-node stability predictions for Active Site Shield loss evaluation
         node_preds = self.node_readout(h).view(-1)
 
-        # Handle single-point or multi-point mutation position inputs
         if isinstance(mutation_pos, (list, tuple, torch.Tensor)):
             pos_list = torch.tensor(mutation_pos, dtype=torch.long, device=h.device) if not isinstance(mutation_pos, torch.Tensor) else mutation_pos.long()
         else:
             pos_list = torch.tensor([mutation_pos], dtype=torch.long, device=h.device)
 
-        # SUM-POOLED FEATURE VECTOR: Accumulates multi-point signals cleanly
+        # SUM-POOLED FEATURE VECTOR
         mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]
 
         # 10A Gaussian RBF spatial neighborhood pooling
