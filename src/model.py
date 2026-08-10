@@ -68,10 +68,6 @@ class PETaseStabilityEGNN(nn.Module):
             nn.Linear(emb_dim, 1)
         )
 
-        # Learnable Affine Output Calibration Layer (Initial scale m=2.25, bias b=2.50)
-        self.affine_scale = nn.Parameter(torch.tensor([2.25]))
-        self.affine_bias = nn.Parameter(torch.tensor([2.50]))
-
     def forward(self, graph_data, mutation_pos):
         h = self.embedding(graph_data.x.float())
         pos = graph_data.pos.float()
@@ -81,13 +77,14 @@ class PETaseStabilityEGNN(nn.Module):
         h, pos = self.layer2(h, pos, edge_index)
 
         node_preds = self.node_readout(h).view(-1)
-        num_nodes = h.size(0)
+        num_nodes = h.size(0)  # 265 nodes
 
         if isinstance(mutation_pos, (list, tuple, torch.Tensor)):
             pos_list = torch.tensor(mutation_pos, dtype=torch.long, device=h.device) if not isinstance(mutation_pos, torch.Tensor) else mutation_pos.long()
         else:
             pos_list = torch.tensor([mutation_pos], dtype=torch.long, device=h.device)
 
+        # Safety Index Clamping: Guarantees pos_list is strictly within [0, num_nodes - 1]
         pos_list = torch.clamp(pos_list, 0, num_nodes - 1)
 
         # SUM-POOLED FEATURE VECTOR
@@ -101,12 +98,8 @@ class PETaseStabilityEGNN(nn.Module):
         rbf_weights = torch.exp(-0.5 * (min_dists / 10.0) ** 2).unsqueeze(-1)
         pooled_h = (h * rbf_weights).sum(dim=0, keepdim=True) / (rbf_weights.sum() + 1e-8)
 
-        combined_h = torch.cat([mutated_node_h, pooled_h], dim=-1)
+        combined_h = torch.cat([mutated_node_h, pooled_h], dim=-1)  # Shape: [1, 64]
         combined_h = self.dropout(combined_h)
 
-        raw_pred = self.regression_head(combined_h)
-        
-        # Affine output calibration transformation: y = m * raw_pred + b
-        calibrated_pred = self.affine_scale * raw_pred + self.affine_bias
-        
-        return calibrated_pred.view(-1), node_preds
+        prediction = self.regression_head(combined_h)
+        return prediction.view(-1), node_preds
