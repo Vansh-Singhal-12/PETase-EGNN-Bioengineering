@@ -60,12 +60,16 @@ class PETaseStabilityEGNN(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.node_readout = nn.Linear(emb_dim, 1)
         
-        # 64D dual-tensor regression head
+        # 96D Epistatic Non-Linear Regression Head
+        # Concatenates: [32D Mutated Node || 32D Spatial Context || 32D Hadamard Interaction (Mutated x Context)]
         self.regression_head = nn.Sequential(
-            nn.Linear(emb_dim * 2, emb_dim),
+            nn.Linear(emb_dim * 3, emb_dim * 2),  # 96 -> 64
             nn.SiLU(),
             nn.Dropout(p=dropout),
-            nn.Linear(emb_dim, 1)
+            nn.Linear(emb_dim * 2, emb_dim),       # 64 -> 32
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(emb_dim, 1)                  # 32 -> 1
         )
 
     def forward(self, graph_data, mutation_pos):
@@ -84,13 +88,12 @@ class PETaseStabilityEGNN(nn.Module):
         else:
             pos_list = torch.tensor([mutation_pos], dtype=torch.long, device=h.device)
 
-        # Safety Index Clamping: Guarantees pos_list is strictly within [0, num_nodes - 1]
         pos_list = torch.clamp(pos_list, 0, num_nodes - 1)
 
-        # SUM-POOLED FEATURE VECTOR
-        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]
+        # 1. Direct Sum-Pooled Mutated Node Feature Vector [32D]
+        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)
 
-        # 10A Gaussian RBF spatial neighborhood pooling
+        # 2. 10A Gaussian RBF Spatial Context Pooling [32D]
         mutated_coords = pos[pos_list]
         dist_matrix = torch.cdist(pos, mutated_coords)
         min_dists, _ = torch.min(dist_matrix, dim=-1)
@@ -98,8 +101,12 @@ class PETaseStabilityEGNN(nn.Module):
         rbf_weights = torch.exp(-0.5 * (min_dists / 10.0) ** 2).unsqueeze(-1)
         pooled_h = (h * rbf_weights).sum(dim=0, keepdim=True) / (rbf_weights.sum() + 1e-8)
 
-        combined_h = torch.cat([mutated_node_h, pooled_h], dim=-1)  # Shape: [1, 64]
-        combined_h = self.dropout(combined_h)
+        # 3. Element-Wise Hadamard Interaction Vector [32D] (Captures 2nd-order Epistatic Synergy)
+        interaction_h = mutated_node_h * pooled_h
 
-        prediction = self.regression_head(combined_h)
+        # Concatenate into 96D Epistatic Feature Tensor
+        epistatic_combined_h = torch.cat([mutated_node_h, pooled_h, interaction_h], dim=-1)  # Shape: [1, 96]
+        epistatic_combined_h = self.dropout(epistatic_combined_h)
+
+        prediction = self.regression_head(epistatic_combined_h)
         return prediction.view(-1), node_preds
