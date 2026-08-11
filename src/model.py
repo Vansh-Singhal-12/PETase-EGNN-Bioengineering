@@ -60,13 +60,17 @@ class PETaseStabilityEGNN(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.node_readout = nn.Linear(emb_dim, 1)
         
-        # Optimal 64D dual-tensor regression head (32D Mutated Node || 32D Spatial Context)
+        # 64D dual-tensor regression head
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim * 2, emb_dim),
             nn.SiLU(),
             nn.Dropout(p=dropout),
             nn.Linear(emb_dim, 1)
         )
+
+        # Static Output Layer Initialization: Align baseline bias (+2.5°C) & weight std (0.2)
+        nn.init.constant_(self.regression_head[-1].bias, 2.5)
+        nn.init.normal_(self.regression_head[-1].weight, mean=0.0, std=0.2)
 
     def forward(self, graph_data, mutation_pos):
         h = self.embedding(graph_data.x.float())
@@ -86,10 +90,10 @@ class PETaseStabilityEGNN(nn.Module):
 
         pos_list = torch.clamp(pos_list, 0, num_nodes - 1)
 
-        # 1. Direct Sum-Pooled Mutated Node Feature Vector [32D]
-        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)
+        # SUM-POOLED FEATURE VECTOR
+        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]
 
-        # 2. 10A Gaussian RBF Spatial Context Pooling [32D]
+        # 10A Gaussian RBF spatial neighborhood pooling
         mutated_coords = pos[pos_list]
         dist_matrix = torch.cdist(pos, mutated_coords)
         min_dists, _ = torch.min(dist_matrix, dim=-1)
@@ -97,7 +101,6 @@ class PETaseStabilityEGNN(nn.Module):
         rbf_weights = torch.exp(-0.5 * (min_dists / 10.0) ** 2).unsqueeze(-1)
         pooled_h = (h * rbf_weights).sum(dim=0, keepdim=True) / (rbf_weights.sum() + 1e-8)
 
-        # Concatenate into 64D Dual-Tensor Feature Vector
         combined_h = torch.cat([mutated_node_h, pooled_h], dim=-1)  # Shape: [1, 64]
         combined_h = self.dropout(combined_h)
 
