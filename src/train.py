@@ -61,7 +61,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up EGNN Multi-Point Training Loop (924 Augmented Samples)...")
+    print("Setting up EGNN Training Loop (64D Dual-Tensor, Weight Decay = 1e-3)...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
@@ -71,7 +71,8 @@ def run_training():
     print(f"Batch Size: 16 | Total Batches per Epoch: {len(loader)}")
     
     model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
-    optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
+    # Tuned weight_decay from 1e-2 -> 1e-3 to preserve full delta vector dynamic range
+    optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-3)
     scheduler = CosineAnnealingLR(optimizer, T_max=200, eta_min=1e-6)
     
     best_spearman = -1.0
