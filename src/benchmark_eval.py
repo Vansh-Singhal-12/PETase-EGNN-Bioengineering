@@ -9,7 +9,7 @@ from src.model import PETaseStabilityEGNN
 
 def run_benchmark():
     print("=" * 65)
-    print("PHASE 2: GROUND-TRUTH HISTORICAL BENCHMARK EVALUATION")
+    print(" GROUND-TRUTH HISTORICAL BENCHMARK EVALUATION")
     print("=" * 65)
     
     benchmark_path = "data/benchmark_25.csv"
@@ -75,9 +75,9 @@ def run_benchmark():
     
     # Strict Evaluation Status Output
     if r2_calibrated >= 0.75 and p_val < 0.05 and spearman_rho >= 0.75:
-        print(" SUCCESS: Phase 2 Ground-Truth Benchmark PASSED all targets!")
+        print(" SUCCESS: Ground-Truth Benchmark PASSED all targets!")
     elif spearman_rho >= 0.75 and p_val < 0.05:
-        print(" PHASE 2 VALIDATED: Directional Rank Order (ρ = 0.7762 >= 0.75) & Significance (p < 0.05) PASSED!")
+        print(" VALIDATED: Directional Rank Order (ρ >= 0.75) & Significance (p < 0.05) PASSED!")
         print(f"  -> Structural Calibrated R² = {r2_calibrated:.4f} (Approaching 0.75 target)")
     else:
         print(" NOTICE: Model requires further training scaling to hit benchmark thresholds.")

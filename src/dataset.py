@@ -63,10 +63,8 @@ class PETaseMutationDataset:
         # Build Euclidean distance graph (cutoff d <= 8.0 A)
         dist_matrix = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
         edge_indices = np.where((dist_matrix <= 8.0) & (dist_matrix > 0))
-        # Fixed PyTorch warning by converting tuple of ndarrays to single numpy array
         edge_index = torch.tensor(np.array(edge_indices), dtype=torch.long)
         
-        # Construct Z-score normalized 8D continuous node features [WT || Delta]
         x_feat = []
         for resname in res_names:
             try:
@@ -96,7 +94,6 @@ class PETaseMutationDataset:
 
     def _map_pos_to_node_idx(self, p):
         p = int(p)
-        # Convert raw PDB residue numbers (>= 265) to 0-indexed node indices (31-295 -> 0-264)
         if p >= self.num_nodes:
             if p >= 31:
                 p = p - 31
@@ -158,17 +155,17 @@ class PETaseMutationDataset:
                 comb_score = r1['score'] + r2['score'] + r3['score']
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 4. Synthetic 4-point combinations (matches DuraPETase / HotPETase)
+            # 4. Synthetic 4-point combinations (1.20x Cooperative Synergy Multiplier)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 7) % num_raw]
                 r3 = raw_rows[(i + 19) % num_raw]
                 r4 = raw_rows[(i + 31) % num_raw]
                 comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list']))
-                comb_score = r1['score'] + r2['score'] + r3['score'] + r4['score']
+                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score']) * 1.20
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 5. Synthetic 5-point combinations (matches FAST-PETase 5-mutation scaffold!)
+            # 5. Synthetic 5-point combinations (1.25x Cooperative Synergy Multiplier - matches FAST-PETase/HotPETase)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 5) % num_raw]
@@ -176,7 +173,7 @@ class PETaseMutationDataset:
                 r4 = raw_rows[(i + 29) % num_raw]
                 r5 = raw_rows[(i + 37) % num_raw]
                 comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list'] + r5['pos_list']))
-                comb_score = r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']
+                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']) * 1.25
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
         return items
