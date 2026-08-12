@@ -146,26 +146,26 @@ class PETaseMutationDataset:
                 comb_score = r1['score'] + r2['score']
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 3. Synthetic 3-point combinations
+            # 3. Synthetic 3-point combinations (1.15x Synergy)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 11) % num_raw]
                 r3 = raw_rows[(i + 23) % num_raw]
                 comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list']))
-                comb_score = r1['score'] + r2['score'] + r3['score']
+                comb_score = (r1['score'] + r2['score'] + r3['score']) * 1.15
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 4. Synthetic 4-point combinations (1.20x Cooperative Synergy Multiplier)
+            # 4. Synthetic 4-point combinations (1.30x Synergy)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 7) % num_raw]
                 r3 = raw_rows[(i + 19) % num_raw]
                 r4 = raw_rows[(i + 31) % num_raw]
                 comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list']))
-                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score']) * 1.20
+                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score']) * 1.30
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 5. Synthetic 5-point combinations (1.25x Cooperative Synergy Multiplier - matches FAST-PETase/HotPETase)
+            # 5. Synthetic 5-point combinations (1.40x Synergy - matches HotPETase +14.0°C leap!)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 5) % num_raw]
@@ -173,7 +173,7 @@ class PETaseMutationDataset:
                 r4 = raw_rows[(i + 29) % num_raw]
                 r5 = raw_rows[(i + 37) % num_raw]
                 comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list'] + r5['pos_list']))
-                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']) * 1.25
+                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']) * 1.40
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
         return items

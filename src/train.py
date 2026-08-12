@@ -61,7 +61,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up EGNN Training Loop (Cooperative Synergy Scaling, Weight Decay = 1e-2)...")
+    print("Setting up EGNN Training Loop (Cooperative Synergy 1.40x, 250 Epochs, Weight Decay = 1e-2)...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
@@ -71,14 +71,13 @@ def run_training():
     print(f"Batch Size: 16 | Total Batches per Epoch: {len(loader)}")
     
     model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
-    # Restored gold-standard weight_decay = 1e-2 (0.01)
     optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=200, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=250, eta_min=1e-6)
     
     best_spearman = -1.0
     
     print("-" * 75)
-    for epoch in range(1, 201):
+    for epoch in range(1, 251):
         model.train()
         total_loss = 0.0
         all_preds, all_targets = [], []
@@ -121,7 +120,7 @@ def run_training():
             saved_str = " ➔ [MODEL SAVED]"
             
         if epoch % 10 == 0 or epoch == 1 or saved_str != "":
-            print(f"Epoch {epoch:03d}/200 | Loss: {avg_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f} | LR: {current_lr:.6f}{saved_str}")
+            print(f"Epoch {epoch:03d}/250 | Loss: {avg_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f} | LR: {current_lr:.6f}{saved_str}")
 
     print("-" * 75)
     print(f"Training complete. Best Spearman ρ achieved: {best_spearman:.4f}")
