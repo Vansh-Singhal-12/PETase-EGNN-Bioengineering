@@ -61,7 +61,7 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up EGNN Training Loop (Cooperative Synergy 1.40x, 250 Epochs, Weight Decay = 1e-2)...")
+    print("Setting up EGNN Training Loop (12D Biophysical Features, 250 Epochs, Weight Decay = 1e-2)...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
@@ -70,7 +70,8 @@ def run_training():
     loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=custom_collate)
     print(f"Batch Size: 16 | Total Batches per Epoch: {len(loader)}")
     
-    model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
+    # Model initialized with in_dim=12 for expanded 12D biophysical tensors
+    model = PETaseStabilityEGNN(in_dim=12, emb_dim=32, dropout=0.1)
     optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
     scheduler = CosineAnnealingLR(optimizer, T_max=250, eta_min=1e-6)
     

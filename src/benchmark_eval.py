@@ -23,7 +23,8 @@ def run_benchmark():
     assert len(dataset) == 25, f"Expected 25 benchmark rows, but got {len(dataset)}"
     print("[DATA-LENGTH TEST PASSED] Verification: Prediction array length matches benchmark dataset.")
     
-    model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
+    # Initialized with in_dim=12 for expanded 12D biophysical tensors
+    model = PETaseStabilityEGNN(in_dim=12, emb_dim=32, dropout=0.1)
     checkpoint_path = "checkpoints/best_egnn.pt"
     
     if not os.path.exists(checkpoint_path):
@@ -54,9 +55,9 @@ def run_benchmark():
     ss_tot = np.sum((targets_arr - np.mean(targets_arr)) ** 2)
     r2_raw = 1.0 - (ss_res / (ss_tot + 1e-8))
     
-    # 2. Non-Linear Polynomial Calibration Fit (degree = 2: y = a*x^2 + b*x + c)
-    poly_coeffs = np.polyfit(preds_arr, targets_arr, 2)
-    calibrated_preds = np.polyval(poly_coeffs, preds_arr)
+    # 2. Optimal Linear Calibration Fit (y_calibrated = m * pred + b)
+    slope, intercept = np.polyfit(preds_arr, targets_arr, 1)
+    calibrated_preds = slope * preds_arr + intercept
     ss_res_cal = np.sum((targets_arr - calibrated_preds) ** 2)
     r2_calibrated = 1.0 - (ss_res_cal / (ss_tot + 1e-8))
     
@@ -65,20 +66,17 @@ def run_benchmark():
     
     print("-" * 65)
     print("BENCHMARK METRICS RESULTS:")
-    print(f"  • Raw R² (Coefficient of Determination)      : {r2_raw:.4f} (Target: ≥ 0.75)")
-    print(f"  • Calibrated R² (2nd-Degree Polynomial Fit) : {r2_calibrated:.4f} (Target: ≥ 0.75)")
-    print(f"  • Calibration Coeffs (a, b, c)              : a = {poly_coeffs[0]:.3f}, b = {poly_coeffs[1]:.3f}, c = {poly_coeffs[2]:.3f}")
-    print(f"  • p-value                                   : {p_val:.4e} (Target: < 0.05)")
-    print(f"  • Spearman Correlation (ρ)                 : {spearman_rho:.4f} (Target: ≥ 0.75)")
-    print(f"  • Pearson Correlation (r)                  : {pearson_r:.4f}")
+    print(f"  • Raw R² (Coefficient of Determination) : {r2_raw:.4f} (Target: ≥ 0.75)")
+    print(f"  • Calibrated R² (Optimal Linear Fit)   : {r2_calibrated:.4f} (Target: ≥ 0.75)")
+    print(f"  • Calibration Slope (m) / Intercept (b)  : m = {slope:.3f}, b = {intercept:.3f}")
+    print(f"  • p-value                              : {p_val:.4e} (Target: < 0.05)")
+    print(f"  • Spearman Correlation (ρ)            : {spearman_rho:.4f} (Target: ≥ 0.75)")
+    print(f"  • Pearson Correlation (r)             : {pearson_r:.4f}")
     print("-" * 65)
     
     # Strict Evaluation Status Output
     if r2_calibrated >= 0.75 and p_val < 0.05 and spearman_rho >= 0.75:
         print(" SUCCESS: Ground-Truth Benchmark PASSED all targets!")
-        print(f"  -> Rank Order Alignment : ρ = {spearman_rho:.4f} (>= 0.75) [PASSED]")
-        print(f"  -> Statistical Significance : p = {p_val:.4e} (< 0.05) [PASSED]")
-        print(f"  -> Structural Calibrated R² : {r2_calibrated:.4f} (>= 0.75) [PASSED]")
     elif spearman_rho >= 0.75 and p_val < 0.05:
         print(" VALIDATED: Directional Rank Order (ρ >= 0.75) & Significance (p < 0.05) PASSED!")
         print(f"  -> Structural Calibrated R² = {r2_calibrated:.4f} (Approaching 0.75 target)")

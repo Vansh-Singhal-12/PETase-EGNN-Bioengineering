@@ -51,8 +51,9 @@ class EGNNLayer(MessagePassing):
 
 
 class PETaseStabilityEGNN(nn.Module):
-    def __init__(self, in_dim=8, emb_dim=32, dropout=0.1):
+    def __init__(self, in_dim=12, emb_dim=32, dropout=0.1):
         super(PETaseStabilityEGNN, self).__init__()
+        # Updated input projection dimension to 12D continuous features
         self.embedding = nn.Linear(in_dim, emb_dim)
         self.layer1 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
         self.layer2 = EGNNLayer(emb_dim=emb_dim, coord_scale=0.1)
@@ -60,7 +61,7 @@ class PETaseStabilityEGNN(nn.Module):
         self.dropout = nn.Dropout(p=dropout)
         self.node_readout = nn.Linear(emb_dim, 1)
         
-        # Optimal 64D dual-tensor regression head (32D Mutated Node || 32D Spatial Context)
+        # 64D dual-tensor regression head (32D Mutated Node || 32D Spatial Context)
         self.regression_head = nn.Sequential(
             nn.Linear(emb_dim * 2, emb_dim),
             nn.SiLU(),
@@ -77,7 +78,7 @@ class PETaseStabilityEGNN(nn.Module):
         h, pos = self.layer2(h, pos, edge_index)
 
         node_preds = self.node_readout(h).view(-1)
-        num_nodes = h.size(0)  # 265 nodes
+        num_nodes = h.size(0)
 
         if isinstance(mutation_pos, (list, tuple, torch.Tensor)):
             pos_list = torch.tensor(mutation_pos, dtype=torch.long, device=h.device) if not isinstance(mutation_pos, torch.Tensor) else mutation_pos.long()
@@ -86,10 +87,10 @@ class PETaseStabilityEGNN(nn.Module):
 
         pos_list = torch.clamp(pos_list, 0, num_nodes - 1)
 
-        # 1. Direct Sum-Pooled Mutated Node Feature Vector [32D]
-        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  
+        # SUM-POOLED FEATURE VECTOR
+        mutated_node_h = h[pos_list].sum(dim=0).unsqueeze(0)  # Shape: [1, 32]
 
-        # 2. 10A Gaussian RBF spatial neighborhood pooling
+        # 10A Gaussian RBF spatial neighborhood pooling
         mutated_coords = pos[pos_list]
         dist_matrix = torch.cdist(pos, mutated_coords)
         min_dists, _ = torch.min(dist_matrix, dim=-1)
