@@ -12,22 +12,18 @@ AA_TO_INT = {
     'T': 16, 'W': 17, 'Y': 18, 'V': 19
 }
 
-# 6D Biophysical Properties Table:
-# [Volume (Da), Hydropathy, Charge, H-Bonds, Conformational Entropy (cal/mol K), Secondary Structure Propensity]
+# 4D Biophysical Properties Table [Volume (Da), Hydropathy, Charge, H-Bonds]
 AA_PROPERTIES = {
-    'A': [89.1, 1.8, 0, 0, 4.1, 1.42],    'R': [174.2, -4.5, 1, 4, 6.2, 0.98],
-    'N': [132.1, -3.5, 0, 2, 5.3, 0.67],   'D': [133.1, -3.5, -1, 2, 5.1, 1.01],
-    'C': [121.2, 2.5, 0, 0, 3.8, 0.70],   'E': [147.1, -3.5, -1, 2, 5.4, 1.51],
-    'Q': [146.1, -3.5, 0, 2, 5.6, 1.11],   'G': [75.1, -0.4, 0, 0, 7.1, 0.57],
-    'H': [155.2, -3.2, 0.5, 2, 4.9, 1.00], 'I': [131.2, 4.5, 0, 0, 4.8, 1.60],
-    'L': [131.2, 3.8, 0, 0, 4.9, 1.21],   'K': [146.2, -3.9, 1, 2, 6.1, 1.16],
-    'M': [149.2, 1.9, 0, 0, 5.2, 1.45],   'F': [165.2, 2.8, 0, 0, 5.0, 1.38],
-    'P': [115.1, -1.6, 0, 0, 1.8, 0.57],   'S': [105.1, -0.8, 0, 1, 4.6, 0.77],
-    'T': [119.1, -0.7, 0, 1, 4.7, 1.20],   'W': [204.2, -0.9, 0, 1, 5.3, 1.37],
-    'Y': [181.2, -1.3, 0, 1, 5.2, 1.47],   'V': [117.1, 4.2, 0, 0, 4.7, 1.65]
+    'A': [89.1, 1.8, 0, 0], 'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
+    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0], 'E': [147.1, -3.5, -1, 2],
+    'Q': [146.1, -3.5, 0, 2], 'G': [75.1, -0.4, 0, 0], 'H': [155.2, -3.2, 0.5, 2],
+    'I': [131.2, 4.5, 0, 0], 'L': [131.2, 3.8, 0, 0], 'K': [146.2, -3.9, 1, 2],
+    'M': [149.2, 1.9, 0, 0], 'F': [165.2, 2.8, 0, 0], 'P': [115.1, -1.6, 0, 0],
+    'S': [105.1, -0.8, 0, 1], 'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
+    'Y': [181.2, -1.3, 0, 1], 'V': [117.1, 4.2, 0, 0]
 }
 
-# Z-score normalize 6D property vectors
+# Z-score normalize 4D property vectors
 props_matrix = np.array(list(AA_PROPERTIES.values()))
 props_mean = props_matrix.mean(axis=0)
 props_std = props_matrix.std(axis=0) + 1e-8
@@ -43,7 +39,7 @@ class PETaseMutationDataset:
         self.augment_inverse = augment_inverse
         
         self.base_graph = self._load_protein_as_graph(pdb_path)
-        self.num_nodes = self.base_graph.x.size(0)  # 265 nodes
+        self.num_nodes = self.base_graph.x.size(0)  # 265 nodes (residues 29-293)
         self.df = pd.read_csv(csv_path)
         
         self.items = self._build_dataset_items()
@@ -69,7 +65,7 @@ class PETaseMutationDataset:
         edge_indices = np.where((dist_matrix <= 8.0) & (dist_matrix > 0))
         edge_index = torch.tensor(np.array(edge_indices), dtype=torch.long)
         
-        # Construct Z-score normalized 12D continuous node features [6D WT || 6D Delta]
+        # Construct Z-score normalized 8D continuous node features [4D WT || 4D Delta]
         x_feat = []
         for resname in res_names:
             try:
@@ -77,14 +73,15 @@ class PETaseMutationDataset:
                 one_letter = three_to_one(resname)
             except:
                 one_letter = 'A'
-            wt_props = AA_PROPERTIES_NORM.get(one_letter, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-            x_feat.append(wt_props + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            wt_props = AA_PROPERTIES_NORM.get(one_letter, [0.0, 0.0, 0.0, 0.0])
+            x_feat.append(wt_props + [0.0, 0.0, 0.0, 0.0])
             
         x_tensor = torch.tensor(x_feat, dtype=torch.float)
         pos_tensor = torch.tensor(coords, dtype=torch.float)
         
         # 10.0 A Active Site Shield mask around catalytic triad (Ser120, Asp177, His208)
-        catalytic_indices = [120, 177, 208]
+        # In 0-indexed node coordinates: Ser120 = 120 - 29 = 91, Asp177 = 177 - 29 = 148, His208 = 208 - 29 = 179
+        catalytic_indices = [91, 148, 179]
         valid_cat_indices = [idx for idx in catalytic_indices if idx < num_nodes]
         
         cat_coords = coords[valid_cat_indices]
@@ -99,12 +96,12 @@ class PETaseMutationDataset:
 
     def _map_pos_to_node_idx(self, p):
         p = int(p)
-        if p >= self.num_nodes:
-            if p >= 31:
-                p = p - 31
-            else:
-                p = p % self.num_nodes
-        return max(0, min(p, self.num_nodes - 1))
+        # UNCONDITIONAL OFFSET FIX: 6EQE resolved chain starts at residue 29 (node 0 = residue 29)
+        if p >= 29:
+            node_idx = p - 29
+        else:
+            node_idx = p
+        return max(0, min(node_idx, self.num_nodes - 1))
 
     def _parse_pos_string(self, pos_str):
         if isinstance(pos_str, (int, np.integer)):
@@ -170,7 +167,7 @@ class PETaseMutationDataset:
                 comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score']) * 1.30
                 items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
 
-            # 5. Synthetic 5-point combinations (1.40x Synergy - matches HotPETase +14.0°C leap!)
+            # 5. Synthetic 5-point combinations (1.40x Synergy)
             for i in range(num_raw):
                 r1 = raw_rows[i]
                 r2 = raw_rows[(i + 5) % num_raw]
@@ -194,15 +191,15 @@ class PETaseMutationDataset:
         m_code = mut_type[0] if len(mut_type) > 0 else 'A'
         w_code = wt_type[0] if len(wt_type) > 0 else 'A'
             
-        m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
-        w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+        m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0]))
+        w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0]))
         
         delta_props = (m_props - w_props).tolist()
         
         num_nodes = graph.x.size(0)
         for p in pos_list:
             if p < num_nodes:
-                graph.x[p, 6:] = torch.tensor(delta_props, dtype=torch.float)
+                graph.x[p, 4:] = torch.tensor(delta_props, dtype=torch.float)
                 
         target_tensor = torch.tensor([score], dtype=torch.float)
         mutation_pos_tensor = torch.tensor(pos_list, dtype=torch.long)
