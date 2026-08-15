@@ -79,9 +79,12 @@ class PETaseMutationDataset:
         x_tensor = torch.tensor(x_feat, dtype=torch.float)
         pos_tensor = torch.tensor(coords, dtype=torch.float)
         
-        # 10.0 A Active Site Shield mask around catalytic triad (Ser120, Asp177, His208)
-        # In 0-indexed node coordinates: Ser120 = 120 - 29 = 91, Asp177 = 177 - 29 = 148, His208 = 208 - 29 = 179
-        catalytic_indices = [91, 148, 179]
+        # 10.0 A Active Site Shield mask around catalytic triad.
+        # CORRECTED: "Ser120, Asp177, His208" was wrong -- verified against the real
+        # 6EQE sequence, those positions are Pro/Lys/Ile, not Ser/Asp/His at all.
+        # The real catalytic triad (Austin et al. 2018 PNAS) is Ser160, Asp206, His237.
+        # 0-indexed node coords (offset -29): Ser160->131, Asp206->177, His237->208
+        catalytic_indices = [131, 177, 208]
         valid_cat_indices = [idx for idx in catalytic_indices if idx < num_nodes]
         
         cat_coords = coords[valid_cat_indices]
