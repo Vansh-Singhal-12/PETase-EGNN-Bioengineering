@@ -6,7 +6,11 @@ import pandas as pd
 BENCHMARK_PROTECTED_POSITIONS = {
     121, 186, 224, 233, 280,  # FAST-PETase variants
     159, 132, 214, 238,        # DuraPETase / HotPETase additions
-    95,  181                   # Lu et al. calibration benchmarks
+    95,  181,                  # Lu et al. calibration benchmarks
+    140, 160, 165              # ADDED: these are used in benchmark_25.csv (T140C,
+                                # S160C, G165A) but were missing from this set, so
+                                # training rows at these positions were slipping
+                                # through the homology filter uncaught.
 }
 
 def purge_homologous_training_rows(csv_path="data/mutations.csv", output_path="data/mutations_clean.csv"):
