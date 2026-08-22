@@ -61,24 +61,25 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, alpha=0
 
 
 def run_training():
-    print("Setting up EGNN Training Loop (12D Biophysical Features, 250 Epochs, Weight Decay = 1e-2)...")
+    print("Setting up EGNN Pipeline Smoke Test on Verified Literature Rows...")
     os.makedirs("checkpoints", exist_ok=True)
     
     dataset = PETaseMutationDataset(pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True)
-    print(f"[Data Augmentation] Base rows: 154 -> Augmented rows: {len(dataset)}")
+    print(f"[Data Augmentation] Base rows: {len(dataset.df)} -> Augmented rows: {len(dataset)}")
     
-    loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=custom_collate)
-    print(f"Batch Size: 16 | Total Batches per Epoch: {len(loader)}")
+    # Dynamic batch size guard for small datasets
+    batch_size = min(16, max(2, len(dataset) // 2))
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
+    print(f"Batch Size: {batch_size} | Total Batches per Epoch: {len(loader)}")
     
-    # Model initialized with in_dim=12 for expanded 12D biophysical tensors
-    model = PETaseStabilityEGNN(in_dim=12, emb_dim=32, dropout=0.1)
+    model = PETaseStabilityEGNN(in_dim=8, emb_dim=32, dropout=0.1)
     optimizer = AdamW(model.parameters(), lr=5e-4, weight_decay=1e-2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=250, eta_min=1e-6)
+    scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6)
     
     best_spearman = -1.0
     
     print("-" * 75)
-    for epoch in range(1, 251):
+    for epoch in range(1, 101):
         model.train()
         total_loss = 0.0
         all_preds, all_targets = [], []
@@ -121,10 +122,10 @@ def run_training():
             saved_str = " ➔ [MODEL SAVED]"
             
         if epoch % 10 == 0 or epoch == 1 or saved_str != "":
-            print(f"Epoch {epoch:03d}/250 | Loss: {avg_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f} | LR: {current_lr:.6f}{saved_str}")
+            print(f"Epoch {epoch:03d}/100 | Loss: {avg_loss:.4f} | Spearman ρ: {spearman_rho:.4f} | Pearson r: {pearson_r:.4f} | LR: {current_lr:.6f}{saved_str}")
 
     print("-" * 75)
-    print(f"Training complete. Best Spearman ρ achieved: {best_spearman:.4f}")
+    print(f"Smoke test training complete. Best Spearman ρ achieved: {best_spearman:.4f}")
 
 if __name__ == "__main__":
     run_training()
