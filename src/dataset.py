@@ -1,34 +1,38 @@
-import os
+import re
 import torch
 import numpy as np
 import pandas as pd
 from torch_geometric.data import Data
 from Bio.PDB import PDBParser
 
-# =============================================================================
-# IUPAC STANDARD AMINO ACID DICTIONARIES & BIOPHYSICAL PROPERTY MAPPINGS
-# =============================================================================
+from src.protein_registry import build_registry
 
-# Standard 20 single-letter amino acid integer encoding mapping
-AA_TO_INT = {
-    'A': 0, 'R': 1, 'N': 2, 'D': 3, 'C': 4, 'E': 5, 'Q': 6, 'G': 7,
-    'H': 8, 'I': 9, 'L': 10, 'K': 11, 'M': 12, 'F': 13, 'P': 14, 'S': 15,
-    'T': 16, 'W': 17, 'Y': 18, 'V': 19
+# Explicit mapping instead of Bio.PDB.Polypeptide.three_to_one -- that
+# function was removed in newer Biopython versions (caught by this
+# project's own smoke test), so this avoids depending on an internal API
+# that can silently disappear across environments/versions.
+THREE_TO_ONE = {
+    'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C', 'GLU': 'E',
+    'GLN': 'Q', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LEU': 'L', 'LYS': 'K',
+    'MET': 'M', 'PHE': 'F', 'PRO': 'P', 'SER': 'S', 'THR': 'T', 'TRP': 'W',
+    'TYR': 'Y', 'VAL': 'V',
 }
 
-# 4D Biophysical Properties Table [Volume (Da), Hydropathy (Kyte-Doolittle), Formal Charge, H-Bond Capacity]
-# Quantifies physical/chemical side-chain shock vectors upon mutation
+
+def three_to_one(resname):
+    if resname not in THREE_TO_ONE:
+        raise KeyError(resname)
+    return THREE_TO_ONE[resname]
+
 AA_PROPERTIES = {
-    'A': [89.1, 1.8, 0, 0],   'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
-    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0],  'E': [147.1, -3.5, -1, 2],
-    'Q': [146.1, -3.5, 0, 2],  'G': [75.1, -0.4, 0, 0],  'H': [155.2, -3.2, 0.5, 2],
-    'I': [131.2, 4.5, 0, 0],   'L': [131.2, 3.8, 0, 0],  'K': [146.2, -3.9, 1, 2],
-    'M': [149.2, 1.9, 0, 0],   'F': [165.2, 2.8, 0, 0],  'P': [115.1, -1.6, 0, 0],
-    'S': [105.1, -0.8, 0, 1],  'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
-    'Y': [181.2, -1.3, 0, 1],  'V': [117.1, 4.2, 0, 0]
+    'A': [89.1, 1.8, 0, 0], 'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
+    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0], 'E': [147.1, -3.5, -1, 2],
+    'Q': [146.1, -3.5, 0, 2], 'G': [75.1, -0.4, 0, 0], 'H': [155.2, -3.2, 0.5, 2],
+    'I': [131.2, 4.5, 0, 0], 'L': [131.2, 3.8, 0, 0], 'K': [146.2, -3.9, 1, 2],
+    'M': [149.2, 1.9, 0, 0], 'F': [165.2, 2.8, 0, 0], 'P': [115.1, -1.6, 0, 0],
+    'S': [105.1, -0.8, 0, 1], 'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
+    'Y': [181.2, -1.3, 0, 1], 'V': [117.1, 4.2, 0, 0]
 }
-
-# Z-score normalize 4D property vectors to zero mean and unit variance (mu=0, sigma=1)
 props_matrix = np.array(list(AA_PROPERTIES.values()))
 props_mean = props_matrix.mean(axis=0)
 props_std = props_matrix.std(axis=0) + 1e-8
@@ -37,195 +41,194 @@ AA_PROPERTIES_NORM = {
     for aa, props in AA_PROPERTIES.items()
 }
 
+# Handles both plain positions ("121") and PDB insertion-code positions
+# ("27B", "27C") -- the 4 S2648 rows that got silently dropped earlier
+# (1LVE L27C, V27B, Y27D) are legitimate data, not malformed rows; this
+# fixes that instead of permanently excluding them.
+POS_RE = re.compile(r'^(\d+)([A-Za-z]?)$')
 
-# =============================================================================
-# PYTORCH GEOMETRIC DATASET CONTAINER FOR PETase MUTATIONS
-# =============================================================================
 
 class PETaseMutationDataset:
-    def __init__(self, pdb_path="data/6eqe.pdb", csv_path="data/mutations_clean.csv", augment_inverse=True):
+    """
+    Multi-protein dataset. Every row's CSV must resolve to a `protein_key`
+    matching a registry entry ("6EQE", "LCC", or "{PDBID}_{CHAIN}" for
+    S2648 structures). Rows for different proteins use fully independent
+    graphs -- no cross-protein leakage is structurally possible.
+
+    `source_tag` distinguishes real experimental rows from synthetic
+    combination rows generated during augmentation, so pretraining can use
+    both while fine-tuning/eval can filter to real-only.
+    """
+
+    def __init__(self, csv_paths, augment_inverse=True, augment_combinations=False,
+                 registry=None):
         """
-        Initializes the PyG dataset wrapper for IsPETase mutation stability modeling.
-        
-        Args:
-            pdb_path (str): Path to canonical 6EQE wild-type crystal structure PDB file.
-            csv_path (str): Path to literature mutation tracking CSV file.
-            augment_inverse (bool): If True, dynamically generates inverse mutations and synthetic multi-point pairs.
+        csv_paths: single path or list of paths. Each CSV needs columns:
+            wild_type, mutation_type, position_idx, stability_score,
+            and EITHER protein_id (for "6EQE"/"LCC") OR protein_id+chain
+            (for S2648 rows, will be combined into "{protein_id}_{chain}").
+        augment_combinations: only meaningful for PRETRAINING -- generates
+            synthetic multi-point combos via additive-approximation labels.
+            Must stay False for any fine-tuning or evaluation dataset,
+            since the additive assumption is known to be wrong in real
+            cases (verified session 5: Stevensen et al. combo ΔΔG did not
+            equal the sum of its parts).
         """
-        self.pdb_path = pdb_path
-        self.csv_path = csv_path
+        if isinstance(csv_paths, str):
+            csv_paths = [csv_paths]
+        self.registry = registry if registry is not None else build_registry(verbose=False)
+
+        frames = []
+        for path in csv_paths:
+            df = pd.read_csv(path)
+            if "protein_id" not in df.columns:
+                # Pre-multi-protein CSVs (mutations_verified_stability.csv,
+                # benchmark_25.csv, mutations_clean.csv) predate this column
+                # entirely -- every one of them is 6EQE-specific data from
+                # earlier sessions, so that's the correct, documented default
+                # rather than a silent guess.
+                df["protein_id"] = "6EQE"
+            if "chain" in df.columns:
+                df["protein_key"] = df.apply(
+                    lambda r: f"{str(r['protein_id']).upper()}_{r['chain']}"
+                    if pd.notna(r.get("chain")) else str(r["protein_id"]).upper(),
+                    axis=1)
+            else:
+                df["protein_key"] = df["protein_id"].astype(str).str.upper()
+            frames.append(df)
+        self.df = pd.concat(frames, ignore_index=True)
+
+        unknown = set(self.df["protein_key"]) - set(self.registry.keys())
+        if unknown:
+            print(f"[dataset] WARNING: {len(unknown)} protein_key(s) in the CSV have no "
+                  f"registry entry (missing PDB file?) -- dropping their rows: {sorted(unknown)[:10]}...")
+            self.df = self.df[self.df["protein_key"].isin(self.registry.keys())].reset_index(drop=True)
+
         self.augment_inverse = augment_inverse
-        
-        # Load wild-type 3D spatial graph once into memory (265 C_alpha nodes, residues 29-293)
-        self.base_graph = self._load_protein_as_graph(pdb_path)
-        self.num_nodes = self.base_graph.x.size(0)  # 265 nodes
-        
-        self.df = pd.read_csv(csv_path)
-        
-        # Build training items array (single, inverse, and synthetic multi-point combinations)
+        self.augment_combinations = augment_combinations
+
+        self.base_graphs = {}
+        for protein_key in self.df["protein_key"].unique():
+            self.base_graphs[protein_key] = self._load_protein_as_graph(protein_key)
+
         self.items = self._build_dataset_items()
-        
-    def _load_protein_as_graph(self, pdb_path):
-        """
-        Parses 3D Cartesian coordinates (x,y,z) of C_alpha backbone atoms from PDB structure
-        and constructs thresholded Euclidean distance graph (d <= 8.0 Angstroms).
-        """
+
+    def _load_protein_as_graph(self, protein_key):
+        cfg = self.registry[protein_key]
         parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("PETase", pdb_path)
-        
-        coords = []
-        res_names = []
+        structure = parser.get_structure(protein_key, cfg["pdb_path"])
+
+        coords, res_names = [], []
+        target_chain = cfg["chain_id"]
         for model in structure:
             for chain in model:
+                if chain.id != target_chain:
+                    continue
                 for residue in chain:
-                    if residue.has_id("CA"):
+                    if residue.has_id("CA") and residue.id[0] == ' ':
                         coords.append(residue["CA"].get_coord())
                         res_names.append(residue.get_resname())
-                        
+            break
+
         coords = np.array(coords)
         num_nodes = len(coords)
-        
-        # Build thresholded Euclidean distance adjacency graph (d <= 8.0 Angstroms)
+
         dist_matrix = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
         edge_indices = np.where((dist_matrix <= 8.0) & (dist_matrix > 0))
-        # Fixed PyTorch warning by converting tuple of ndarrays to a single numpy array
         edge_index = torch.tensor(np.array(edge_indices), dtype=torch.long)
-        
-        # Construct Z-score normalized 8D continuous node feature vectors [4D WT || 4D Delta=0]
+
         x_feat = []
         for resname in res_names:
             try:
-                from Bio.PDB.Polypeptide import three_to_one
                 one_letter = three_to_one(resname)
-            except:
+            except Exception:
                 one_letter = 'A'
             wt_props = AA_PROPERTIES_NORM.get(one_letter, [0.0, 0.0, 0.0, 0.0])
             x_feat.append(wt_props + [0.0, 0.0, 0.0, 0.0])
-            
+
         x_tensor = torch.tensor(x_feat, dtype=torch.float)
         pos_tensor = torch.tensor(coords, dtype=torch.float)
-        
-        # 10.0 A Active Site Shield mask around catalytic triad.
-        # CORRECTED: "Ser120, Asp177, His208" was wrong -- verified against the real
-        # 6EQE sequence, those positions are Pro/Lys/Ile, not Ser/Asp/His at all.
-        # The real catalytic triad (Austin et al. 2018 PNAS) is Ser160, Asp206, His237.
-        # 0-indexed node coords (offset -29): Ser160->131, Asp206->177, His237->208
-        catalytic_indices = [131, 177, 208]
-        valid_cat_indices = [idx for idx in catalytic_indices if idx < num_nodes]
-        
-        cat_coords = coords[valid_cat_indices]
-        dists_to_cat = np.linalg.norm(coords[:, None, :] - cat_coords[None, :, :], axis=-1)
-        min_cat_dists = dists_to_cat.min(axis=-1)
-        
-        active_site_shield = torch.tensor(min_cat_dists <= 10.0, dtype=torch.bool)
-        
+
+        triad = cfg.get("catalytic_triad")
+        if triad:
+            first_res = cfg["first_resolved_residue"]
+            cat_idx = [r - first_res for r in triad]
+            cat_idx = [i for i in cat_idx if 0 <= i < num_nodes]
+            cat_coords = coords[cat_idx]
+            dists_to_cat = np.linalg.norm(coords[:, None, :] - cat_coords[None, :, :], axis=-1)
+            min_cat_dists = dists_to_cat.min(axis=-1)
+            active_site_shield = torch.tensor(min_cat_dists <= 10.0, dtype=torch.bool)
+        else:
+            # No verified catalytic triad for this protein -- shield mask is
+            # all-False, so the shield loss term contributes exactly zero
+            # for these rows (train.py already guards on mask.sum() > 0).
+            active_site_shield = torch.zeros(num_nodes, dtype=torch.bool)
+
         graph = Data(x=x_tensor, pos=pos_tensor, edge_index=edge_index)
         graph.active_site_shield = active_site_shield
         return graph
 
-    def _map_pos_to_node_idx(self, p):
-        """
-        Unconditional node mapping: 6EQE resolved chain starts at residue 29 (node 0 = residue 29).
-        Maps PDB residue numbers (29-293) to 0-indexed graph node indices (0-264).
-        """
-        p = int(p)
-        if p >= 29:
-            node_idx = p - 29
-        else:
-            node_idx = p
-        return max(0, min(node_idx, self.num_nodes - 1))
+    def _map_pos_to_node_idx(self, pos_str, protein_key):
+        cfg = self.registry[protein_key]
+        first_res = cfg["first_resolved_residue"]
+        m = POS_RE.match(str(pos_str).strip())
+        if not m:
+            return None
+        base_pos = int(m.group(1))
+        # insertion code (e.g. the "B" in "27B") -- treated as the same base
+        # residue's node for graph purposes, since Cα-graph resolution can't
+        # distinguish sub-residue insertion positions anyway.
+        node_idx = base_pos - first_res if base_pos >= first_res else base_pos
+        num_nodes = self.base_graphs[protein_key].x.size(0)
+        if node_idx < 0 or node_idx >= num_nodes:
+            return None
+        return node_idx
 
-    def _parse_pos_string(self, pos_str):
-        """
-        Parses single or comma-separated position strings into 0-indexed node coordinate lists.
-        """
-        if isinstance(pos_str, (int, np.integer)):
-            raw_list = [int(pos_str)]
-        elif isinstance(pos_str, str):
-            parts = pos_str.replace('[', '').replace(']', '').split(',')
-            raw_list = [int(p.strip()) for p in parts if p.strip()]
-        elif isinstance(pos_str, (list, tuple)):
-            raw_list = [int(p) for p in pos_str]
-        else:
-            raw_list = [0]
-            
-        return [self._map_pos_to_node_idx(p) for p in raw_list]
-
-    def _parse_aa_string(self, aa_str):
-        """
-        Parses single or semicolon/comma-separated amino acid strings (e.g. 'I;S' or 'R;Q').
-        """
-        if not isinstance(aa_str, str):
-            return [str(aa_str)[0] if str(aa_str) else 'A']
-        parts = aa_str.replace(';', ',').split(',')
-        cleaned = [p.strip()[0] for p in parts if p.strip()]
-        return cleaned if cleaned else ['A']
+    def _parse_pos_string(self, pos_str, protein_key):
+        raw_list = [p.strip() for p in str(pos_str).replace('[', '').replace(']', '').split(',') if p.strip()]
+        mapped = [self._map_pos_to_node_idx(p, protein_key) for p in raw_list]
+        mapped = [m for m in mapped if m is not None]
+        return mapped if mapped else None
 
     def _build_dataset_items(self):
-        """
-        Builds dataset rows: base single mutations, inverse mutations (B->A), and
-        synthetic multi-point combinations (2-, 3-, 4-, 5-point) with synergy scaling.
-        """
         items = []
         raw_rows = []
-        
+
         for idx, row in self.df.iterrows():
-            pos_list = self._parse_pos_string(row['position_idx'])
+            protein_key = row["protein_key"]
+            pos_list = self._parse_pos_string(row['position_idx'], protein_key)
+            if pos_list is None:
+                continue
             score = float(row['stability_score'])
             mut_type = str(row.get('mutation_type', 'A'))
             wt_type = str(row.get('wild_type', 'A'))
-            
-            raw_rows.append({
-                'pos_list': pos_list,
-                'score': score,
-                'mut_type': mut_type,
-                'wt_type': wt_type
-            })
-            items.append((pos_list, score, mut_type, wt_type, False))
-            
+
+            r = {'pos_list': pos_list, 'score': score, 'mut_type': mut_type,
+                 'wt_type': wt_type, 'protein_key': protein_key}
+            raw_rows.append(r)
+            items.append((pos_list, score, mut_type, wt_type, protein_key, "real"))
+
         if self.augment_inverse:
-            # 1. Inverse single mutations (B -> A with inverted target -Delta T_m)
             for r in raw_rows:
-                items.append((r['pos_list'], -r['score'], r['wt_type'], r['mut_type'], True))
-                
-            num_raw = len(raw_rows)
-            # 2. Synthetic 2-point combinations
-            for i in range(num_raw):
-                r1 = raw_rows[i]
-                r2 = raw_rows[(i + 17) % num_raw]
-                comb_pos = list(set(r1['pos_list'] + r2['pos_list']))
-                comb_score = r1['score'] + r2['score']
-                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
+                items.append((r['pos_list'], -r['score'], r['wt_type'], r['mut_type'],
+                              r['protein_key'], "real_inverse"))
 
-            # 3. Synthetic 3-point combinations (1.15x Synergy Multiplier)
-            for i in range(num_raw):
-                r1 = raw_rows[i]
-                r2 = raw_rows[(i + 11) % num_raw]
-                r3 = raw_rows[(i + 23) % num_raw]
-                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list']))
-                comb_score = (r1['score'] + r2['score'] + r3['score']) * 1.15
-                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
-
-            # 4. Synthetic 4-point combinations (1.30x Synergy Multiplier)
-            for i in range(num_raw):
-                r1 = raw_rows[i]
-                r2 = raw_rows[(i + 7) % num_raw]
-                r3 = raw_rows[(i + 19) % num_raw]
-                r4 = raw_rows[(i + 31) % num_raw]
-                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list']))
-                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score']) * 1.30
-                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
-
-            # 5. Synthetic 5-point combinations (1.40x Synergy Multiplier - matches HotPETase/FAST-PETase)
-            for i in range(num_raw):
-                r1 = raw_rows[i]
-                r2 = raw_rows[(i + 5) % num_raw]
-                r3 = raw_rows[(i + 13) % num_raw]
-                r4 = raw_rows[(i + 29) % num_raw]
-                r5 = raw_rows[(i + 37) % num_raw]
-                comb_pos = list(set(r1['pos_list'] + r2['pos_list'] + r3['pos_list'] + r4['pos_list'] + r5['pos_list']))
-                comb_score = (r1['score'] + r2['score'] + r3['score'] + r4['score'] + r5['score']) * 1.40
-                items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'], False))
+        if self.augment_combinations:
+            by_protein = {}
+            for r in raw_rows:
+                by_protein.setdefault(r['protein_key'], []).append(r)
+            for protein_key, rows in by_protein.items():
+                n = len(rows)
+                if n < 2:
+                    continue
+                for i in range(n):
+                    r1, r2 = rows[i], rows[(i + 17) % n]
+                    if r1['pos_list'] == r2['pos_list']:
+                        continue
+                    comb_pos = list(set(r1['pos_list'] + r2['pos_list']))
+                    comb_score = r1['score'] + r2['score']  # additive approximation -- pretraining-only
+                    items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'],
+                                  protein_key, "synthetic_combo"))
 
         return items
 
@@ -233,33 +236,23 @@ class PETaseMutationDataset:
         return len(self.items)
 
     def __getitem__(self, idx):
-        """
-        Retrieves a 3D spatial graph with injected 4D biophysical delta vectors at mutated node indices.
-        """
-        pos_list, score, mut_type, wt_type, is_inverse = self.items[idx]
-        
-        graph = self.base_graph.clone()
-        
-        # Parse single or multi-point amino acid codes
-        m_codes = self._parse_aa_string(mut_type)
-        w_codes = self._parse_aa_string(wt_type)
-        
+        pos_list, score, mut_type, wt_type, protein_key, source_tag = self.items[idx]
+
+        graph = self.base_graphs[protein_key].clone()
+
+        m_code = mut_type[0] if len(mut_type) > 0 else 'A'
+        w_code = wt_type[0] if len(wt_type) > 0 else 'A'
+        m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0]))
+        w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0]))
+        delta_props = (m_props - w_props).tolist()
+
         num_nodes = graph.x.size(0)
-        for i, p in enumerate(pos_list):
+        for p in pos_list:
             if p < num_nodes:
-                # Match corresponding AA code per position index
-                m_c = m_codes[i] if i < len(m_codes) else m_codes[0]
-                w_c = w_codes[i] if i < len(w_codes) else w_codes[0]
-                
-                m_props = np.array(AA_PROPERTIES_NORM.get(m_c, [0.0, 0.0, 0.0, 0.0]))
-                w_props = np.array(AA_PROPERTIES_NORM.get(w_c, [0.0, 0.0, 0.0, 0.0]))
-                delta_props = (m_props - w_props).tolist()
-                
-                # Inject 4D biophysical delta vector into nodes [channels 4:8]
                 graph.x[p, 4:] = torch.tensor(delta_props, dtype=torch.float)
-                
+
         target_tensor = torch.tensor([score], dtype=torch.float)
         mutation_pos_tensor = torch.tensor(pos_list, dtype=torch.long)
         shield_mask = graph.active_site_shield
-        
-        return graph, target_tensor, mutation_pos_tensor, shield_mask
+
+        return graph, target_tensor, mutation_pos_tensor, shield_mask, protein_key, source_tag
