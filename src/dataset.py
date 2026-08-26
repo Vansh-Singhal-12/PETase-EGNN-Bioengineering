@@ -168,6 +168,37 @@ class PETaseMutationDataset:
         graph.active_site_shield = active_site_shield
         return graph
 
+    def _parse_letter_list(self, field, n_positions):
+        """
+        Parses a wild_type or mutation_type field into a list aligned 1:1
+        with a row's positions. Supports semicolon-separated per-position
+        letters ("I;S" for a 2-position row -- the format the real
+        I168R/S188Q entry already uses), or a single letter broadcast to
+        all positions (only valid/correct when n_positions == 1 -- this is
+        what every single-mutation row in every CSV so far actually is).
+        """
+        field = str(field)
+        if ';' in field:
+            parts = [p.strip() for p in field.split(';') if p.strip()]
+        else:
+            parts = [field.strip()] * n_positions
+        if len(parts) != n_positions:
+            raise ValueError(
+                f"wild_type/mutation_type field '{field}' has {len(parts)} letter(s) "
+                f"but the row has {n_positions} position(s) -- these must match "
+                f"exactly (use ';'-separated letters per position for multi-point rows)."
+            )
+        for p in parts:
+            if p not in AA_PROPERTIES_NORM:
+                raise ValueError(
+                    f"'{p}' (parsed from field '{field}') is not a valid single-letter "
+                    f"amino acid code. This usually means the CSV is using the OLD "
+                    f"format where mutation_type held strings like '121D;D186H' "
+                    f"(position number fused with the letter) instead of clean "
+                    f"per-position letters like 'D;H'. Fix the CSV, not this parser."
+                )
+        return parts
+
     def _map_pos_to_node_idx(self, pos_str, protein_key):
         cfg = self.registry[protein_key]
         first_res = cfg["first_resolved_residue"]
@@ -200,35 +231,60 @@ class PETaseMutationDataset:
             if pos_list is None:
                 continue
             score = float(row['stability_score'])
-            mut_type = str(row.get('mutation_type', 'A'))
-            wt_type = str(row.get('wild_type', 'A'))
+            try:
+                mut_list = self._parse_letter_list(row.get('mutation_type', 'A'), len(pos_list))
+                wt_list = self._parse_letter_list(row.get('wild_type', 'A'), len(pos_list))
+            except ValueError as e:
+                print(f"[dataset] WARNING: skipping row {idx} ({protein_key}): {e}")
+                continue
 
-            r = {'pos_list': pos_list, 'score': score, 'mut_type': mut_type,
-                 'wt_type': wt_type, 'protein_key': protein_key}
+            r = {'pos_list': pos_list, 'score': score, 'mut_list': mut_list,
+                 'wt_list': wt_list, 'protein_key': protein_key}
             raw_rows.append(r)
-            items.append((pos_list, score, mut_type, wt_type, protein_key, "real"))
+            items.append((pos_list, score, mut_list, wt_list, protein_key, "real"))
 
         if self.augment_inverse:
             for r in raw_rows:
-                items.append((r['pos_list'], -r['score'], r['wt_type'], r['mut_type'],
+                items.append((r['pos_list'], -r['score'], r['wt_list'], r['mut_list'],
                               r['protein_key'], "real_inverse"))
 
         if self.augment_combinations:
+            # Builds synthetic 2, 3, 4, and 5-point combinations, matching
+            # the combo sizes actually present in benchmark_25.csv (up to
+            # 5 mutations), so pretraining exposes the model to graphs with
+            # as many simultaneously-mutated nodes as it'll see at eval time.
+            # Score is a PLAIN additive sum -- no synergy multiplier, unlike
+            # the original PETase-specific code, since any multiplier tuned
+            # to a handful of famous PETase variants has no justified basis
+            # for arbitrary S2648 proteins. This is explicitly a rough
+            # approximation for pretraining only (see class docstring).
             by_protein = {}
             for r in raw_rows:
                 by_protein.setdefault(r['protein_key'], []).append(r)
+
+            offsets_by_depth = {2: [17], 3: [11, 23], 4: [7, 19, 31], 5: [5, 13, 29, 37]}
+
             for protein_key, rows in by_protein.items():
                 n = len(rows)
-                if n < 2:
-                    continue
-                for i in range(n):
-                    r1, r2 = rows[i], rows[(i + 17) % n]
-                    if r1['pos_list'] == r2['pos_list']:
+                for depth, offsets in offsets_by_depth.items():
+                    if n <= depth:
                         continue
-                    comb_pos = list(set(r1['pos_list'] + r2['pos_list']))
-                    comb_score = r1['score'] + r2['score']  # additive approximation -- pretraining-only
-                    items.append((comb_pos, comb_score, r1['mut_type'], r1['wt_type'],
-                                  protein_key, "synthetic_combo"))
+                    for i in range(n):
+                        combo_rows = [rows[i]] + [rows[(i + off) % n] for off in offsets]
+                        # skip if any two picks share a position -- can't
+                        # cleanly represent two different mutations at the
+                        # same node in one graph
+                        all_pos = [p for cr in combo_rows for p in cr['pos_list']]
+                        if len(set(all_pos)) != len(all_pos):
+                            continue
+                        comb_pos, comb_wt, comb_mt = [], [], []
+                        for cr in combo_rows:
+                            comb_pos.extend(cr['pos_list'])
+                            comb_wt.extend(cr['wt_list'])
+                            comb_mt.extend(cr['mut_list'])
+                        comb_score = sum(cr['score'] for cr in combo_rows)
+                        items.append((comb_pos, comb_score, comb_wt, comb_mt,
+                                      protein_key, f"synthetic_combo_{depth}pt"))
 
         return items
 
@@ -236,20 +292,21 @@ class PETaseMutationDataset:
         return len(self.items)
 
     def __getitem__(self, idx):
-        pos_list, score, mut_type, wt_type, protein_key, source_tag = self.items[idx]
+        pos_list, score, wt_list, mut_list, protein_key, source_tag = self.items[idx]
 
         graph = self.base_graphs[protein_key].clone()
-
-        m_code = mut_type[0] if len(mut_type) > 0 else 'A'
-        w_code = wt_type[0] if len(wt_type) > 0 else 'A'
-        m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0]))
-        w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0]))
-        delta_props = (m_props - w_props).tolist()
-
         num_nodes = graph.x.size(0)
-        for p in pos_list:
-            if p < num_nodes:
-                graph.x[p, 4:] = torch.tensor(delta_props, dtype=torch.float)
+
+        # Per-position delta -- each mutated node gets ITS OWN wild-type ->
+        # mutant delta, not one delta copied across every position (that
+        # was the bug this replaces).
+        for p, w_code, m_code in zip(pos_list, wt_list, mut_list):
+            if p >= num_nodes:
+                continue
+            m_props = np.array(AA_PROPERTIES_NORM.get(m_code, [0.0, 0.0, 0.0, 0.0]))
+            w_props = np.array(AA_PROPERTIES_NORM.get(w_code, [0.0, 0.0, 0.0, 0.0]))
+            delta_props = (m_props - w_props).tolist()
+            graph.x[p, 4:] = torch.tensor(delta_props, dtype=torch.float)
 
         target_tensor = torch.tensor([score], dtype=torch.float)
         mutation_pos_tensor = torch.tensor(pos_list, dtype=torch.long)
