@@ -241,7 +241,7 @@ class PETaseMutationDataset:
             r = {'pos_list': pos_list, 'score': score, 'mut_list': mut_list,
                  'wt_list': wt_list, 'protein_key': protein_key}
             raw_rows.append(r)
-            items.append((pos_list, score, mut_list, wt_list, protein_key, "real"))
+            items.append((pos_list, score, wt_list, mut_list, protein_key, "real"))
 
         if self.augment_inverse:
             for r in raw_rows:
