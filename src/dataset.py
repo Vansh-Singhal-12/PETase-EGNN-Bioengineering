@@ -24,6 +24,7 @@ def three_to_one(resname):
         raise KeyError(resname)
     return THREE_TO_ONE[resname]
 
+
 AA_PROPERTIES = {
     'A': [89.1, 1.8, 0, 0], 'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
     'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0], 'E': [147.1, -3.5, -1, 2],
@@ -61,7 +62,7 @@ class PETaseMutationDataset:
     """
 
     def __init__(self, csv_paths, augment_inverse=True, augment_combinations=False,
-                 registry=None):
+                 max_synthetic_ratio=1.0, registry=None):
         """
         csv_paths: single path or list of paths. Each CSV needs columns:
             wild_type, mutation_type, position_idx, stability_score,
@@ -73,10 +74,24 @@ class PETaseMutationDataset:
             since the additive assumption is known to be wrong in real
             cases (verified session 5: Stevensen et al. combo ΔΔG did not
             equal the sum of its parts).
+        max_synthetic_ratio: CAPS synthetic combo rows per protein to at
+            most this multiple of that protein's REAL row count (default
+            1.0 = synthetic rows never outnumber real rows for any given
+            protein). This exists because of a real, diagnosed failure:
+            an earlier run with this cap absent generated 8428 synthetic
+            combo rows against only 2629 real rows (61% of the whole
+            pretraining set), and the model learned to fit the trivially-
+            exploitable "sum of parts" pattern in the synthetic majority
+            rather than genuine per-mutation structural signal -- confirmed
+            by a fresh in-sample eval showing rho=0.26 on real rows despite
+            training logs reporting rho=0.85 on the full (synthetic-
+            dominated) mix. Capping the ratio keeps combo-graph exposure
+            for the model without letting it dominate the loss.
         """
         if isinstance(csv_paths, str):
             csv_paths = [csv_paths]
         self.registry = registry if registry is not None else build_registry(verbose=False)
+        self.max_synthetic_ratio = max_synthetic_ratio
 
         frames = []
         for path in csv_paths:
@@ -258,18 +273,35 @@ class PETaseMutationDataset:
             # to a handful of famous PETase variants has no justified basis
             # for arbitrary S2648 proteins. This is explicitly a rough
             # approximation for pretraining only (see class docstring).
+            #
+            # CAPPED per protein at max_synthetic_ratio * (that protein's
+            # real row count) -- see __init__ docstring for why this cap
+            # exists. Without it, synthetic rows can vastly outnumber real
+            # ones (diagnosed: 8428 synthetic vs 2629 real, 61% of the
+            # dataset), letting the model fit the trivial "sum of parts"
+            # shortcut instead of learning real per-mutation signal.
             by_protein = {}
             for r in raw_rows:
                 by_protein.setdefault(r['protein_key'], []).append(r)
 
             offsets_by_depth = {2: [17], 3: [11, 23], 4: [7, 19, 31], 5: [5, 13, 29, 37]}
+            total_synthetic_added = 0
 
             for protein_key, rows in by_protein.items():
                 n = len(rows)
+                budget = max(0, int(round(n * self.max_synthetic_ratio)))
+                added_for_this_protein = 0
+                if budget == 0:
+                    continue
+
                 for depth, offsets in offsets_by_depth.items():
+                    if added_for_this_protein >= budget:
+                        break
                     if n <= depth:
                         continue
                     for i in range(n):
+                        if added_for_this_protein >= budget:
+                            break
                         combo_rows = [rows[i]] + [rows[(i + off) % n] for off in offsets]
                         # skip if any two picks share a position -- can't
                         # cleanly represent two different mutations at the
@@ -285,6 +317,17 @@ class PETaseMutationDataset:
                         comb_score = sum(cr['score'] for cr in combo_rows)
                         items.append((comb_pos, comb_score, comb_wt, comb_mt,
                                       protein_key, f"synthetic_combo_{depth}pt"))
+                        added_for_this_protein += 1
+
+                total_synthetic_added += added_for_this_protein
+
+            n_real = len(raw_rows)
+            n_inverse = len(raw_rows) if self.augment_inverse else 0
+            print(f"[dataset] Row composition: {n_real} real, {n_inverse} inverse-augmented, "
+                  f"{total_synthetic_added} synthetic combo (capped at {self.max_synthetic_ratio}x "
+                  f"real count per protein) -- synthetic is "
+                  f"{100 * total_synthetic_added / max(1, n_real + n_inverse + total_synthetic_added):.1f}% "
+                  f"of the total.")
 
         return items
 
