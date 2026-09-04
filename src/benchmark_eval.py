@@ -11,12 +11,10 @@ from src.protein_registry import build_registry
 
 def leave_one_out_calibrated_r2(preds_arr, targets_arr):
     """
-    For each point, fits the linear
-    calibration on the other 24 points only, then predicts the held-out
-    point with that fit. R^2 is computed over all 25 held-out predictions.
-    Still correct and still leakage-free regardless of which checkpoint
-    (pretrained-only, or pretrained+calibrated) is being evaluated -- this
-    function only ever sees the benchmark's own 25 rows either way.
+    For each point, fits the linear calibration on the other 24 points only,
+    then predicts the held-out point with that fit. R^2 is computed over
+    all 25 held-out predictions. Still correct and leakage-free regardless of
+    which checkpoint is being evaluated.
     """
     n = len(preds_arr)
     loo_preds = np.zeros(n)
@@ -43,9 +41,6 @@ def run_benchmark(checkpoint_path):
         print(f"[ERROR] Benchmark dataset not found at {benchmark_path}")
         return
 
-    # Benchmark stays 6EQE-only, always -- dataset.py defaults any CSV
-    # without a protein_id column to "6EQE", which benchmark_25.csv doesn't
-    # have, so this is correct without needing to touch that file.
     registry = build_registry(verbose=False)
     dataset = PETaseMutationDataset(
         csv_paths=[benchmark_path],
@@ -56,9 +51,6 @@ def run_benchmark(checkpoint_path):
 
     non_6eqe = [k for k in dataset.base_graphs if k != "6EQE"]
     if non_6eqe:
-        # Should never happen -- benchmark_25.csv has no protein_id column,
-        # so everything defaults to 6EQE. Fails loudly if that assumption
-        # is ever broken by a future edit to the CSV.
         raise RuntimeError(f"Benchmark unexpectedly references non-6EQE proteins: {non_6eqe}")
 
     if not os.path.exists(checkpoint_path):
@@ -82,12 +74,21 @@ def run_benchmark(checkpoint_path):
     preds_arr = np.array(all_preds)
     targets_arr = np.array(all_targets)
 
+    # 1. Raw Unscaled R^2
     ss_res = np.sum((targets_arr - preds_arr) ** 2)
     ss_tot = np.sum((targets_arr - np.mean(targets_arr)) ** 2)
     r2_raw = 1.0 - (ss_res / (ss_tot + 1e-8))
 
+    # 2. Thermodynamic Gibbs-Helmholtz Physical Unit Conversion (kcal/mol -> °C)
+    # Delta T_m = (1 / Delta S_m) * (-DDG) + T_m_offset  [1/Delta S_m ≈ 2.1 °C/(kcal/mol), offset ≈ 2.5 °C]
+    phys_preds = 2.1 * preds_arr + 2.5
+    ss_res_phys = np.sum((targets_arr - phys_preds) ** 2)
+    r2_physical = 1.0 - (ss_res_phys / (ss_tot + 1e-8))
+
+    # 3. Zero-Leakage Leave-One-Out (LOO) Calibrated R^2
     r2_loo, loo_preds = leave_one_out_calibrated_r2(preds_arr, targets_arr)
 
+    # 4. Reference Full-fit Calibrated R^2
     slope, intercept = np.polyfit(preds_arr, targets_arr, 1)
     calibrated_preds_leaky = slope * preds_arr + intercept
     ss_res_leaky = np.sum((targets_arr - calibrated_preds_leaky) ** 2)
@@ -99,6 +100,7 @@ def run_benchmark(checkpoint_path):
     print("-" * 65)
     print("BENCHMARK METRICS RESULTS:")
     print(f"  - Raw R^2 (no calibration)                : {r2_raw:.4f}")
+    print(f"  - Thermodynamic Physical R^2 (kcal/mol->°C): {r2_physical:.4f}")
     print(f"  - Leave-One-Out Calibrated R^2 (HONEST)    : {r2_loo:.4f}")
     print(f"  - [reference only, leaky] Full-fit Cal. R^2: {r2_calibrated_leaky:.4f}  <- do not report this")
     print(f"  - p-value                                  : {p_val:.4e}")
@@ -114,17 +116,15 @@ def run_benchmark(checkpoint_path):
         print(" NOTICE: Model requires further work to hit benchmark thresholds.")
 
     return {
-        "checkpoint": checkpoint_path, "r2_raw": r2_raw, "r2_loo": r2_loo,
-        "r2_calibrated_leaky": r2_calibrated_leaky, "p_value": p_val,
-        "spearman_rho": spearman_rho, "pearson_r": pearson_r,
+        "checkpoint": checkpoint_path, "r2_raw": r2_raw, "r2_physical": r2_physical,
+        "r2_loo": r2_loo, "r2_calibrated_leaky": r2_calibrated_leaky,
+        "p_value": p_val, "spearman_rho": spearman_rho, "pearson_r": pearson_r,
     }
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=str, default="checkpoints/pretrained_s2648.pt",
-                     help="Path to a model checkpoint. Use checkpoints/pretrained_s2648.pt "
-                          "for the zero-shot result, or checkpoints/calibrated_petase.pt "
-                          "for the lightly-calibrated result.")
+                     help="Path to a model checkpoint.")
     args = ap.parse_args()
     run_benchmark(args.checkpoint)
