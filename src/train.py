@@ -282,13 +282,12 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
             save_checkpoint_dual(model.state_dict(), f"pretrained_s2648_epoch_{epoch:03d}.pt")
             saved += f" [SYNCED EPOCH {epoch}]"
 
-        if epoch % 5 == 0 or epoch == 1 or "SAVED" in saved:
-            current_lr = scheduler.get_last_lr()[0]
-            pair_str = f"{avg_pairs:.2f}" if avg_pairs is not None else "n/a"
-            print(f"Epoch {epoch:03d}/{epochs} | Loss: {train_loss:.4f} | "
-                  f"Train ρ: {rho_overall:.4f} | Train-real ρ: {rho_real_train:.4f} | "
-                  f"HELD-OUT VAL ρ: {val_rho_overall:.4f} | "
-                  f"Avg same-protein pairs/batch: {pair_str} | LR: {current_lr:.6f}{saved}")
+        current_lr = scheduler.get_last_lr()[0]
+        pair_str = f"{avg_pairs:.2f}" if avg_pairs is not None else "n/a"
+        print(f"Epoch {epoch:03d}/{epochs} | Loss: {train_loss:.4f} | "
+              f"Train ρ: {rho_overall:.4f} | Train-real ρ: {rho_real_train:.4f} | "
+              f"HELD-OUT VAL ρ: {val_rho_overall:.4f} | "
+              f"Avg same-protein pairs/batch: {pair_str} | LR: {current_lr:.6f}{saved}")
 
         if patience_counter >= patience:
             print(f"\n[Early Stopping] No improvement in held-out validation rho for {patience} consecutive epochs. Stopping pretraining at epoch {epoch:03d}.")
@@ -346,8 +345,7 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
 
     for epoch in range(1, epochs + 1):
         loss, rho_overall, r_overall, rho_real, _ = run_epoch(model, loader, optimizer, track_pairs=False)
-        if epoch % 5 == 0 or epoch == 1:
-            print(f"Epoch {epoch:03d}/{epochs} | Loss: {loss:.4f} | Spearman rho: {rho_overall:.4f} | Pearson r: {r_overall:.4f}")
+        print(f"Epoch {epoch:03d}/{epochs} | Loss: {loss:.4f} | Spearman rho: {rho_overall:.4f} | Pearson r: {r_overall:.4f}")
 
     save_checkpoint_dual(model.state_dict(), "calibrated_petase.pt")
     print(f"\nCalibration complete. Saved: checkpoints/calibrated_petase.pt")
