@@ -76,6 +76,12 @@ class ProteinFilteredSubset:
 
 
 def custom_collate(batch):
+    # dataset.py's __getitem__ now returns a 6-tuple:
+    # (graph, target, mutation_pos, shield_mask, protein_key, source_tag).
+    # protein_key/source_tag aren't needed by the loss function, but are
+    # carried through explicitly (not silently dropped) so any future code
+    # -- e.g. per-protein diagnostics, or filtering synthetic_combo rows
+    # out of a metrics report -- has them available without another rewrite.
     graph_datas = [item[0] for item in batch]
     target_scores = torch.stack([item[1] for item in batch], dim=0).view(-1)
     mutation_poses = [item[2] for item in batch]
@@ -95,7 +101,6 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein
         preds_diff = preds.unsqueeze(1) - preds.unsqueeze(0)
         targets_diff = targets.unsqueeze(1) - targets.unsqueeze(0)
         target_sign = torch.sign(targets_diff)
-
         ranking_loss = torch.relu(-target_sign * preds_diff + margin)
 
         # TIED-TARGET FIX: when two rows have equal real stability scores,
@@ -125,7 +130,6 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein
         if mask is not None and mask.sum() > 0:
             shielded_preds = node_preds[mask]
             shield_penalties.append(torch.mean(torch.relu(-shielded_preds)))
-
     shield_penalty = torch.stack(shield_penalties).mean() if shield_penalties else torch.tensor(0.0, device=preds.device)
 
     total_loss = mse_loss + (alpha * pairwise_loss) + (beta * shield_penalty)
@@ -187,7 +191,14 @@ def run_epoch(model, loader, optimizer=None, track_pairs=False):
 
 
 def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resume=False,
-             holdout_frac=0.12):
+             holdout_frac=0.12, patience=20):
+    """
+    PHASE 1: pretrain on the general S2648 corpus (+inverse mutations, +
+    synthetic multi-point combos as weak/approximate augmentation -- see
+    dataset.py's docstring on why that's pretraining-only). No PETase data
+    at all in this phase, so nothing here can leak into the benchmark.
+    Includes early stopping based on held-out validation Spearman rho.
+    """
     print("=" * 70)
     print("PHASE 1: PRETRAINING on S2648 general protein-stability corpus")
     print("=" * 70)
@@ -243,6 +254,8 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
 
     best_val_rho = -1.0
+    patience_counter = 0
+
     for epoch in range(1, epochs + 1):
         train_loss, rho_overall, r_overall, rho_real_train, avg_pairs = run_epoch(
             model, train_loader, optimizer, track_pairs=True
@@ -257,8 +270,11 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
         saved = ""
         if not np.isnan(val_rho_overall) and val_rho_overall > best_val_rho:
             best_val_rho = val_rho_overall
+            patience_counter = 0
             save_checkpoint_dual(model.state_dict(), "pretrained_s2648.pt")
             saved = " -> [SAVED BEST HELD-OUT VAL RHO]"
+        else:
+            patience_counter += 1
 
         save_checkpoint_dual(model.state_dict(), "pretrained_s2648_latest.pt")
 
@@ -274,6 +290,10 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
                   f"HELD-OUT VAL ρ: {val_rho_overall:.4f} | "
                   f"Avg same-protein pairs/batch: {pair_str} | LR: {current_lr:.6f}{saved}")
 
+        if patience_counter >= patience:
+            print(f"\n[Early Stopping] No improvement in held-out validation rho for {patience} consecutive epochs. Stopping pretraining at epoch {epoch:03d}.")
+            break
+
     print(f"\nPretraining complete. Best held-out-val checkpoint saved to checkpoints/pretrained_s2648.pt "
           f"(best val rho: {best_val_rho:.4f})")
     return "checkpoints/pretrained_s2648.pt"
@@ -285,14 +305,22 @@ def zero_shot_eval_note():
 
 
 def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30, lr=1e-4):
+    """
+    PHASE 2 (optional, light-touch): freezes the EGNN backbone entirely and
+    only fits the small regression head, using the handful of REAL,
+    verified PETase-specific rows. Deliberately NOT a full fine-tune --
+    with only 4 real rows, updating the whole network risks catastrophic
+    forgetting of everything pretraining learned. Report this AND the
+    zero-shot number in the writeup, not just one of them.
+    """
     print("=" * 70)
     print("PHASE 2: LIGHT CALIBRATION (regression head only) on real PETase data")
     print("=" * 70)
 
     registry = build_registry(verbose=False)
     dataset = PETaseMutationDataset(
-        csv_paths=["data/mutations_verified_stability.csv"],
-        augment_inverse=True, augment_combinations=False,
+        csv_paths=["data/mutations_verified_stability.csv"],  # the 4 real, verified 6EQE rows
+        augment_inverse=True, augment_combinations=False,  # NEVER synthetic here
         registry=registry,
     )
     print(f"Calibration set: {len(dataset)} rows (real experimental data only)")
@@ -306,6 +334,7 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
 
     model.load_state_dict(torch.load(pretrained_checkpoint))
 
+    # Freeze everything except the regression head
     for name, param in model.named_parameters():
         param.requires_grad = "regression_head" in name
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -334,12 +363,13 @@ if __name__ == "__main__":
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--holdout_frac", type=float, default=0.12)
+    ap.add_argument("--patience", type=int, default=20, help="Early stopping patience (epochs without validation improvement)")
     ap.add_argument("--resume", action="store_true", help="Resume pretraining from latest checkpoint")
     args = ap.parse_args()
 
     if args.phase == "pretrain":
         pretrain(epochs=args.epochs or 200, lr=args.lr or 5e-4, resume=args.resume,
-                  holdout_frac=args.holdout_frac)
+                  holdout_frac=args.holdout_frac, patience=args.patience)
         zero_shot_eval_note()
     else:
         calibrate(epochs=args.epochs or 30, lr=args.lr or 1e-4)
