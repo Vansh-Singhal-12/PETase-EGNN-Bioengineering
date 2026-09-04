@@ -309,8 +309,7 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
     only fits the small regression head, using the handful of REAL,
     verified PETase-specific rows. Deliberately NOT a full fine-tune --
     with only 4 real rows, updating the whole network risks catastrophic
-    forgetting of everything pretraining learned. Report this AND the
-    zero-shot number in the writeup, not just one of them.
+    forgetting of everything pretraining learned. 
     """
     print("=" * 70)
     print("PHASE 2: LIGHT CALIBRATION (regression head only) on real PETase data")
@@ -318,7 +317,7 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
 
     registry = build_registry(verbose=False)
     dataset = PETaseMutationDataset(
-        csv_paths=["data/mutations_verified_stability.csv"],  # the 4 real, verified 6EQE rows
+        csv_paths=["data/mutations_clean.csv"],  # the 4 real, verified 6EQE rows
         augment_inverse=True, augment_combinations=False,  # NEVER synthetic here
         registry=registry,
     )
