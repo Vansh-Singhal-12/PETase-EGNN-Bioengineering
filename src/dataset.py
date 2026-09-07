@@ -1,3 +1,4 @@
+import os
 import re
 import torch
 import numpy as np
@@ -7,10 +8,8 @@ from Bio.PDB import PDBParser
 
 from src.protein_registry import build_registry
 
-# Explicit mapping instead of Bio.PDB.Polypeptide.three_to_one -- that
-# function was removed in newer Biopython versions (caught by this
-# project's own smoke test), so this avoids depending on an internal API
-# that can silently disappear across environments/versions.
+# Explicit mapping instead of Bio.PDB.Polypeptide.three_to_one -- avoids depending
+# on internal APIs that change across Biopython versions.
 THREE_TO_ONE = {
     'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C', 'GLU': 'E',
     'GLN': 'Q', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LEU': 'L', 'LYS': 'K',
@@ -25,15 +24,17 @@ def three_to_one(resname):
     return THREE_TO_ONE[resname]
 
 
+# 4D Biophysical Properties Table [Volume (Da), Hydropathy (Kyte-Doolittle), Formal Charge, H-Bond Capacity]
 AA_PROPERTIES = {
-    'A': [89.1, 1.8, 0, 0], 'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
-    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0], 'E': [147.1, -3.5, -1, 2],
-    'Q': [146.1, -3.5, 0, 2], 'G': [75.1, -0.4, 0, 0], 'H': [155.2, -3.2, 0.5, 2],
-    'I': [131.2, 4.5, 0, 0], 'L': [131.2, 3.8, 0, 0], 'K': [146.2, -3.9, 1, 2],
-    'M': [149.2, 1.9, 0, 0], 'F': [165.2, 2.8, 0, 0], 'P': [115.1, -1.6, 0, 0],
-    'S': [105.1, -0.8, 0, 1], 'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
-    'Y': [181.2, -1.3, 0, 1], 'V': [117.1, 4.2, 0, 0]
+    'A': [89.1, 1.8, 0, 0],   'R': [174.2, -4.5, 1, 4], 'N': [132.1, -3.5, 0, 2],
+    'D': [133.1, -3.5, -1, 2], 'C': [121.2, 2.5, 0, 0],  'E': [147.1, -3.5, -1, 2],
+    'Q': [146.1, -3.5, 0, 2],  'G': [75.1, -0.4, 0, 0],  'H': [155.2, -3.2, 0.5, 2],
+    'I': [131.2, 4.5, 0, 0],   'L': [131.2, 3.8, 0, 0],  'K': [146.2, -3.9, 1, 2],
+    'M': [149.2, 1.9, 0, 0],   'F': [165.2, 2.8, 0, 0],  'P': [115.1, -1.6, 0, 0],
+    'S': [105.1, -0.8, 0, 1],  'T': [119.1, -0.7, 0, 1], 'W': [204.2, -0.9, 0, 1],
+    'Y': [181.2, -1.3, 0, 1],  'V': [117.1, 4.2, 0, 0]
 }
+
 props_matrix = np.array(list(AA_PROPERTIES.values()))
 props_mean = props_matrix.mean(axis=0)
 props_std = props_matrix.std(axis=0) + 1e-8
@@ -42,52 +43,23 @@ AA_PROPERTIES_NORM = {
     for aa, props in AA_PROPERTIES.items()
 }
 
-# Handles both plain positions ("121") and PDB insertion-code positions
-# ("27B", "27C") -- the 4 S2648 rows that got silently dropped earlier
-# (1LVE L27C, V27B, Y27D) are legitimate data, not malformed rows; this
-# fixes that instead of permanently excluding them.
+# Regex parsing plain positions ("121") and PDB insertion-code positions ("27B", "27C")
 POS_RE = re.compile(r'^(\d+)([A-Za-z]?)$')
 
 
 class PETaseMutationDataset:
     """
-    Multi-protein dataset. Every row's CSV must resolve to a `protein_key`
+    Multi-protein dataset. Every row's CSV resolves to a `protein_key`
     matching a registry entry ("6EQE", "LCC", or "{PDBID}_{CHAIN}" for
     S2648 structures). Rows for different proteins use fully independent
     graphs -- no cross-protein leakage is structurally possible.
 
     `source_tag` distinguishes real experimental rows from synthetic
-    combination rows generated during augmentation, so pretraining can use
-    both while fine-tuning/eval can filter to real-only.
+    combination rows generated during augmentation.
     """
 
     def __init__(self, csv_paths, augment_inverse=True, augment_combinations=False,
-                 max_synthetic_ratio=1.0, registry=None):
-        """
-        csv_paths: single path or list of paths. Each CSV needs columns:
-            wild_type, mutation_type, position_idx, stability_score,
-            and EITHER protein_id (for "6EQE"/"LCC") OR protein_id+chain
-            (for S2648 rows, will be combined into "{protein_id}_{chain}").
-        augment_combinations: only meaningful for PRETRAINING -- generates
-            synthetic multi-point combos via additive-approximation labels.
-            Must stay False for any fine-tuning or evaluation dataset,
-            since the additive assumption is known to be wrong in real
-            cases (verified session 5: Stevensen et al. combo ΔΔG did not
-            equal the sum of its parts).
-        max_synthetic_ratio: CAPS synthetic combo rows per protein to at
-            most this multiple of that protein's REAL row count (default
-            1.0 = synthetic rows never outnumber real rows for any given
-            protein). This exists because of a real, diagnosed failure:
-            an earlier run with this cap absent generated 8428 synthetic
-            combo rows against only 2629 real rows (61% of the whole
-            pretraining set), and the model learned to fit the trivially-
-            exploitable "sum of parts" pattern in the synthetic majority
-            rather than genuine per-mutation structural signal -- confirmed
-            by a fresh in-sample eval showing rho=0.26 on real rows despite
-            training logs reporting rho=0.85 on the full (synthetic-
-            dominated) mix. Capping the ratio keeps combo-graph exposure
-            for the model without letting it dominate the loss.
-        """
+                 max_synthetic_ratio=0.25, registry=None):
         if isinstance(csv_paths, str):
             csv_paths = [csv_paths]
         self.registry = registry if registry is not None else build_registry(verbose=False)
@@ -97,11 +69,6 @@ class PETaseMutationDataset:
         for path in csv_paths:
             df = pd.read_csv(path)
             if "protein_id" not in df.columns:
-                # Pre-multi-protein CSVs (mutations_verified_stability.csv,
-                # benchmark_25.csv, mutations_clean.csv) predate this column
-                # entirely -- every one of them is 6EQE-specific data from
-                # earlier sessions, so that's the correct, documented default
-                # rather than a silent guess.
                 df["protein_id"] = "6EQE"
             if "chain" in df.columns:
                 df["protein_key"] = df.apply(
@@ -116,7 +83,7 @@ class PETaseMutationDataset:
         unknown = set(self.df["protein_key"]) - set(self.registry.keys())
         if unknown:
             print(f"[dataset] WARNING: {len(unknown)} protein_key(s) in the CSV have no "
-                  f"registry entry (missing PDB file?) -- dropping their rows: {sorted(unknown)[:10]}...")
+                  f"registry entry -- dropping their rows: {sorted(unknown)[:10]}...")
             self.df = self.df[self.df["protein_key"].isin(self.registry.keys())].reset_index(drop=True)
 
         self.augment_inverse = augment_inverse
@@ -174,9 +141,6 @@ class PETaseMutationDataset:
             min_cat_dists = dists_to_cat.min(axis=-1)
             active_site_shield = torch.tensor(min_cat_dists <= 10.0, dtype=torch.bool)
         else:
-            # No verified catalytic triad for this protein -- shield mask is
-            # all-False, so the shield loss term contributes exactly zero
-            # for these rows (train.py already guards on mask.sum() > 0).
             active_site_shield = torch.zeros(num_nodes, dtype=torch.bool)
 
         graph = Data(x=x_tensor, pos=pos_tensor, edge_index=edge_index)
@@ -185,12 +149,8 @@ class PETaseMutationDataset:
 
     def _parse_letter_list(self, field, n_positions):
         """
-        Parses a wild_type or mutation_type field into a list aligned 1:1
-        with a row's positions. Supports semicolon-separated per-position
-        letters ("I;S" for a 2-position row -- the format the real
-        I168R/S188Q entry already uses), or a single letter broadcast to
-        all positions (only valid/correct when n_positions == 1 -- this is
-        what every single-mutation row in every CSV so far actually is).
+        Parses wild_type or mutation_type fields into a list aligned 1:1 with positions.
+        Enforces strict single-letter amino acid code validation.
         """
         field = str(field)
         if ';' in field:
@@ -200,17 +160,13 @@ class PETaseMutationDataset:
         if len(parts) != n_positions:
             raise ValueError(
                 f"wild_type/mutation_type field '{field}' has {len(parts)} letter(s) "
-                f"but the row has {n_positions} position(s) -- these must match "
-                f"exactly (use ';'-separated letters per position for multi-point rows)."
+                f"but row has {n_positions} position(s) -- these must match exactly."
             )
         for p in parts:
             if p not in AA_PROPERTIES_NORM:
                 raise ValueError(
-                    f"'{p}' (parsed from field '{field}') is not a valid single-letter "
-                    f"amino acid code. This usually means the CSV is using the OLD "
-                    f"format where mutation_type held strings like '121D;D186H' "
-                    f"(position number fused with the letter) instead of clean "
-                    f"per-position letters like 'D;H'. Fix the CSV, not this parser."
+                    f"'{p}' (parsed from '{field}') is not a valid single-letter "
+                    f"amino acid code. Check CSV format for position-fused strings."
                 )
         return parts
 
@@ -221,9 +177,6 @@ class PETaseMutationDataset:
         if not m:
             return None
         base_pos = int(m.group(1))
-        # insertion code (e.g. the "B" in "27B") -- treated as the same base
-        # residue's node for graph purposes, since Cα-graph resolution can't
-        # distinguish sub-residue insertion positions anyway.
         node_idx = base_pos - first_res if base_pos >= first_res else base_pos
         num_nodes = self.base_graphs[protein_key].x.size(0)
         if node_idx < 0 or node_idx >= num_nodes:
@@ -256,30 +209,16 @@ class PETaseMutationDataset:
             r = {'pos_list': pos_list, 'score': score, 'mut_list': mut_list,
                  'wt_list': wt_list, 'protein_key': protein_key}
             raw_rows.append(r)
+            # Tuple packing order: (pos_list, score, wt_list, mut_list, protein_key, source_tag)
             items.append((pos_list, score, wt_list, mut_list, protein_key, "real"))
 
         if self.augment_inverse:
             for r in raw_rows:
-                items.append((r['pos_list'], -r['score'], r['wt_list'], r['mut_list'],
+                # Inverse mutation swaps mut_list and wt_list positions while inverting score
+                items.append((r['pos_list'], -r['score'], r['mut_list'], r['wt_list'],
                               r['protein_key'], "real_inverse"))
 
         if self.augment_combinations:
-            # Builds synthetic 2, 3, 4, and 5-point combinations, matching
-            # the combo sizes actually present in benchmark_25.csv (up to
-            # 5 mutations), so pretraining exposes the model to graphs with
-            # as many simultaneously-mutated nodes as it'll see at eval time.
-            # Score is a PLAIN additive sum -- no synergy multiplier, unlike
-            # the original PETase-specific code, since any multiplier tuned
-            # to a handful of famous PETase variants has no justified basis
-            # for arbitrary S2648 proteins. This is explicitly a rough
-            # approximation for pretraining only (see class docstring).
-            #
-            # CAPPED per protein at max_synthetic_ratio * (that protein's
-            # real row count) -- see __init__ docstring for why this cap
-            # exists. Without it, synthetic rows can vastly outnumber real
-            # ones (diagnosed: 8428 synthetic vs 2629 real, 61% of the
-            # dataset), letting the model fit the trivial "sum of parts"
-            # shortcut instead of learning real per-mutation signal.
             by_protein = {}
             for r in raw_rows:
                 by_protein.setdefault(r['protein_key'], []).append(r)
@@ -303,9 +242,6 @@ class PETaseMutationDataset:
                         if added_for_this_protein >= budget:
                             break
                         combo_rows = [rows[i]] + [rows[(i + off) % n] for off in offsets]
-                        # skip if any two picks share a position -- can't
-                        # cleanly represent two different mutations at the
-                        # same node in one graph
                         all_pos = [p for cr in combo_rows for p in cr['pos_list']]
                         if len(set(all_pos)) != len(all_pos):
                             continue
@@ -340,9 +276,7 @@ class PETaseMutationDataset:
         graph = self.base_graphs[protein_key].clone()
         num_nodes = graph.x.size(0)
 
-        # Per-position delta -- each mutated node gets ITS OWN wild-type ->
-        # mutant delta, not one delta copied across every position (that
-        # was the bug this replaces).
+        # Per-position delta assignment (Mutant - WT)
         for p, w_code, m_code in zip(pos_list, wt_list, mut_list):
             if p >= num_nodes:
                 continue

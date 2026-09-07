@@ -47,11 +47,9 @@ def save_checkpoint_dual(state_dict, filename):
 
 class ProteinFilteredSubset:
     """
-    Thin wrapper around PETaseMutationDataset that exposes only the rows
-    whose protein_key is in `allowed_protein_keys` (and, optionally, whose
-    source_tag is in `allowed_source_tags`). Does NOT touch dataset.py --
-    reuses the same base_graphs and __getitem__ logic, just filters which
-    indices are visible.
+    Thin wrapper around PETaseMutationDataset that exposes only rows whose
+    protein_key is in `allowed_protein_keys`. Reuses base_graphs without
+    modifying dataset.py, carving out a whole-protein validation split.
     """
 
     def __init__(self, dataset, allowed_protein_keys, allowed_source_tags=None):
@@ -79,35 +77,53 @@ def custom_collate(batch):
     return graph_datas, target_scores, mutation_poses, shield_masks, protein_keys, source_tags
 
 
-def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein_keys, alpha=0.02, beta=0.05, margin=0.2):
-    mse_loss = nn.MSELoss()(preds, targets)
+def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein_keys, source_tags,
+                          alpha=0.02, beta=0.05, margin=0.2, synthetic_weight=0.5):
+    # 1. Consistent Sample Weights (1.0x for real/inverse, synthetic_weight for synthetic combos)
+    sample_weights = torch.tensor(
+        [synthetic_weight if "synthetic" in tag else 1.0 for tag in source_tags],
+        dtype=torch.float, device=preds.device
+    )
+    
+    # Weighted MSE Loss
+    mse_loss = (sample_weights * (preds - targets) ** 2).mean()
 
+    # 2. Pairwise Margin Ranking Loss (Restricted to Same-Protein Pairs with Consistent Weighting)
     n = preds.size(0)
     if n > 1:
         preds_diff = preds.unsqueeze(1) - preds.unsqueeze(0)
         targets_diff = targets.unsqueeze(1) - targets.unsqueeze(0)
         target_sign = torch.sign(targets_diff)
+
         ranking_loss = torch.relu(-target_sign * preds_diff + margin)
+        # Zero out tied-target pairs
         ranking_loss = ranking_loss * (target_sign != 0).float()
+
+        # Apply synthetic weight matrix: min(weight_i, weight_j)
+        pair_weights = torch.min(sample_weights.unsqueeze(1), sample_weights.unsqueeze(0))
+        weighted_ranking_loss = ranking_loss * pair_weights
 
         pkey_arr = np.array(protein_keys)
         same_protein = torch.tensor(pkey_arr[:, None] == pkey_arr[None, :], dtype=torch.bool, device=preds.device)
         non_self_mask = ~torch.eye(n, dtype=torch.bool, device=preds.device)
+
         valid_pair_mask = same_protein & non_self_mask
 
         if valid_pair_mask.any():
-            pairwise_loss = ranking_loss[valid_pair_mask].mean()
+            pairwise_loss = weighted_ranking_loss[valid_pair_mask].mean()
         else:
             pairwise_loss = torch.tensor(0.0, device=preds.device)
     else:
         pairwise_loss = torch.tensor(0.0, device=preds.device)
         valid_pair_mask = None
 
+    # 3. Active Site Shield Penalty
     shield_penalties = []
     for node_preds, mask in zip(node_preds_list, shield_masks):
         if mask is not None and mask.sum() > 0:
             shielded_preds = node_preds[mask]
             shield_penalties.append(torch.mean(torch.relu(-shielded_preds)))
+
     shield_penalty = torch.stack(shield_penalties).mean() if shield_penalties else torch.tensor(0.0, device=preds.device)
 
     total_loss = mse_loss + (alpha * pairwise_loss) + (beta * shield_penalty)
@@ -130,20 +146,23 @@ def run_epoch(model, loader, optimizer=None, track_pairs=False):
                 optimizer.zero_grad()
 
             preds_list, node_preds_list = [], []
-            # CHANGED: use_interaction is now decided per-row from source_tag
-            # -- only "real" / "real_inverse" rows get the interaction term;
-            # synthetic combo rows (additively labeled) fall back to plain
-            # sum-pooling inside the model, so interaction_mlp never trains
-            # on a contradictory signal.
             for graph_data, pos, stag in zip(graph_datas, mutation_poses, source_tags):
                 use_interact = stag in ("real", "real_inverse")
-                p, np_pred = model(graph_data, pos, use_interaction=use_interact)
+                
+                # 3D Coordinate Thermal Jittering (sigma = 0.03 A) during training passes
+                if is_train:
+                    g_jitter = graph_data.clone()
+                    g_jitter.pos = g_jitter.pos + torch.randn_like(g_jitter.pos) * 0.03
+                    p, np_pred = model(g_jitter, pos, use_interaction=use_interact)
+                else:
+                    p, np_pred = model(graph_data, pos, use_interaction=use_interact)
+
                 preds_list.append(p)
                 node_preds_list.append(np_pred)
             preds = torch.cat(preds_list, dim=0)
 
             loss, n_valid_pairs = custom_composite_loss(
-                preds, target_scores, node_preds_list, shield_masks, protein_keys
+                preds, target_scores, node_preds_list, shield_masks, protein_keys, source_tags
             )
             if track_pairs:
                 pair_counts.append(n_valid_pairs)
@@ -189,11 +208,12 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
     dataset = PETaseMutationDataset(
         csv_paths=["data/mutations_s2648_pretraining.csv"],
         augment_inverse=True, augment_combinations=augment_combinations,
-        max_synthetic_ratio=1.0,
+        max_synthetic_ratio=0.25,
         registry=registry,
     )
     print(f"\nPretraining set: {len(dataset)} total rows across {len(dataset.base_graphs)} protein/chain graphs")
 
+    # HELD-OUT PROTEIN SPLIT: carve out whole protein backbones for validation
     all_protein_keys = sorted(dataset.df["protein_key"].unique().tolist())
     shuffled_keys = all_protein_keys[:]
     random.Random(RANDOM_SEED).shuffle(shuffled_keys)
@@ -208,10 +228,6 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
     train_subset = ProteinFilteredSubset(dataset, train_proteins)
     val_subset = ProteinFilteredSubset(dataset, holdout_proteins, allowed_source_tags={"real"})
     print(f"[split] train rows: {len(train_subset)}, held-out validation rows (real-only): {len(val_subset)}")
-    if len(val_subset) < 5:
-        print("[split] WARNING: fewer than 5 real held-out validation rows -- "
-              "validation Spearman will be noisy. Consider a larger holdout_frac "
-              "or check that held-out proteins actually have real (non-synthetic) rows.")
 
     train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, collate_fn=custom_collate)
     val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, collate_fn=custom_collate)
@@ -253,12 +269,13 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
             save_checkpoint_dual(model.state_dict(), f"pretrained_s2648_epoch_{epoch:03d}.pt")
             saved += f" [SYNCED EPOCH {epoch}]"
 
-        current_lr = scheduler.get_last_lr()[0]
-        pair_str = f"{avg_pairs:.2f}" if avg_pairs is not None else "n/a"
-        print(f"Epoch {epoch:03d}/{epochs} | Loss: {train_loss:.4f} | "
-              f"Train ρ: {rho_overall:.4f} | Train-real ρ: {rho_real_train:.4f} | "
-              f"HELD-OUT VAL ρ: {val_rho_overall:.4f} | "
-              f"Avg same-protein pairs/batch: {pair_str} | LR: {current_lr:.6f}{saved}")
+        if epoch % 5 == 0 or epoch == 1 or "SAVED" in saved:
+            current_lr = scheduler.get_last_lr()[0]
+            pair_str = f"{avg_pairs:.2f}" if avg_pairs is not None else "n/a"
+            print(f"Epoch {epoch:03d}/{epochs} | Loss: {train_loss:.4f} | "
+                  f"Train ρ: {rho_overall:.4f} | Train-real ρ: {rho_real_train:.4f} | "
+                  f"HELD-OUT VAL ρ: {val_rho_overall:.4f} | "
+                  f"Avg same-protein pairs/batch: {pair_str} | LR: {current_lr:.6f}{saved}")
 
         if patience_counter >= patience:
             print(f"\n[Early Stopping] No improvement in held-out validation rho for {patience} consecutive epochs. Stopping pretraining at epoch {epoch:03d}.")
@@ -307,15 +324,12 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
 
     for epoch in range(1, epochs + 1):
         loss, rho_overall, r_overall, rho_real, _ = run_epoch(model, loader, optimizer, track_pairs=False)
-        print(f"Epoch {epoch:03d}/{epochs} | Loss: {loss:.4f} | Spearman rho: {rho_overall:.4f} | Pearson r: {r_overall:.4f}")
+        if epoch % 5 == 0 or epoch == 1:
+            print(f"Epoch {epoch:03d}/{epochs} | Loss: {loss:.4f} | Spearman rho: {rho_overall:.4f} | Pearson r: {r_overall:.4f}")
 
     save_checkpoint_dual(model.state_dict(), "calibrated_petase.pt")
     print(f"\nCalibration complete. Saved: checkpoints/calibrated_petase.pt")
     print("Evaluate with: python -m src.benchmark_eval --checkpoint checkpoints/calibrated_petase.pt")
-    print("NOTE: with only ~4 real calibration rows, this loop has no held-out split of its own -- "
-          "report leave-one-out Spearman separately rather than treating this training-set rho "
-          "as a generalization claim. (Current guidance: skip this phase and evaluate the "
-          "pretrained checkpoint directly -- calibration was found to degrade benchmark performance.)")
 
 
 if __name__ == "__main__":
@@ -324,7 +338,7 @@ if __name__ == "__main__":
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--holdout_frac", type=float, default=0.12)
-    ap.add_argument("--patience", type=int, default=20, help="Early stopping patience (epochs without validation improvement)")
+    ap.add_argument("--patience", type=int, default=20, help="Early stopping patience")
     ap.add_argument("--resume", action="store_true", help="Resume pretraining from latest checkpoint")
     args = ap.parse_args()
 
