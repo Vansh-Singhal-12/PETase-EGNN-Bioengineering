@@ -52,12 +52,6 @@ class ProteinFilteredSubset:
     source_tag is in `allowed_source_tags`). Does NOT touch dataset.py --
     reuses the same base_graphs and __getitem__ logic, just filters which
     indices are visible.
-
-    Used to carve out a held-out-protein validation split: proteins in the
-    validation set are fully absent from the training subset, and the
-    validation subset is restricted to real rows only (no inverse/synthetic
-    augmentation), so validation Spearman reflects genuine generalization
-    to unseen protein backbones -- not training-set model selection.
     """
 
     def __init__(self, dataset, allowed_protein_keys, allowed_source_tags=None):
@@ -76,12 +70,6 @@ class ProteinFilteredSubset:
 
 
 def custom_collate(batch):
-    # dataset.py's __getitem__ now returns a 6-tuple:
-    # (graph, target, mutation_pos, shield_mask, protein_key, source_tag).
-    # protein_key/source_tag aren't needed by the loss function, but are
-    # carried through explicitly (not silently dropped) so any future code
-    # -- e.g. per-protein diagnostics, or filtering synthetic_combo rows
-    # out of a metrics report -- has them available without another rewrite.
     graph_datas = [item[0] for item in batch]
     target_scores = torch.stack([item[1] for item in batch], dim=0).view(-1)
     mutation_poses = [item[2] for item in batch]
@@ -92,28 +80,19 @@ def custom_collate(batch):
 
 
 def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein_keys, alpha=0.02, beta=0.05, margin=0.2):
-    # 1. Scale-anchoring MSE Loss
     mse_loss = nn.MSELoss()(preds, targets)
 
-    # 2. Pairwise Margin Ranking Loss (RESTRICTED TO SAME-PROTEIN PAIRS ONLY)
     n = preds.size(0)
     if n > 1:
         preds_diff = preds.unsqueeze(1) - preds.unsqueeze(0)
         targets_diff = targets.unsqueeze(1) - targets.unsqueeze(0)
         target_sign = torch.sign(targets_diff)
         ranking_loss = torch.relu(-target_sign * preds_diff + margin)
-
-        # TIED-TARGET FIX: when two rows have equal real stability scores,
-        # target_sign is 0, which previously still produced a constant
-        # `margin` penalty even though there's no real ranking signal to
-        # enforce between them. Zero those pairs out explicitly.
         ranking_loss = ranking_loss * (target_sign != 0).float()
 
-        # SAME-PROTEIN MASK: Only rank mutations belonging to the exact same protein backbone!
         pkey_arr = np.array(protein_keys)
         same_protein = torch.tensor(pkey_arr[:, None] == pkey_arr[None, :], dtype=torch.bool, device=preds.device)
         non_self_mask = ~torch.eye(n, dtype=torch.bool, device=preds.device)
-
         valid_pair_mask = same_protein & non_self_mask
 
         if valid_pair_mask.any():
@@ -124,7 +103,6 @@ def custom_composite_loss(preds, targets, node_preds_list, shield_masks, protein
         pairwise_loss = torch.tensor(0.0, device=preds.device)
         valid_pair_mask = None
 
-    # 3. Active Site Shield Penalty (Exclusively active on hydrolases with non-zero shield masks)
     shield_penalties = []
     for node_preds, mask in zip(node_preds_list, shield_masks):
         if mask is not None and mask.sum() > 0:
@@ -150,9 +128,16 @@ def run_epoch(model, loader, optimizer=None, track_pairs=False):
         for graph_datas, target_scores, mutation_poses, shield_masks, protein_keys, source_tags in loader:
             if is_train:
                 optimizer.zero_grad()
+
             preds_list, node_preds_list = [], []
-            for graph_data, pos in zip(graph_datas, mutation_poses):
-                p, np_pred = model(graph_data, pos)
+            # CHANGED: use_interaction is now decided per-row from source_tag
+            # -- only "real" / "real_inverse" rows get the interaction term;
+            # synthetic combo rows (additively labeled) fall back to plain
+            # sum-pooling inside the model, so interaction_mlp never trains
+            # on a contradictory signal.
+            for graph_data, pos, stag in zip(graph_datas, mutation_poses, source_tags):
+                use_interact = stag in ("real", "real_inverse")
+                p, np_pred = model(graph_data, pos, use_interaction=use_interact)
                 preds_list.append(p)
                 node_preds_list.append(np_pred)
             preds = torch.cat(preds_list, dim=0)
@@ -192,13 +177,6 @@ def run_epoch(model, loader, optimizer=None, track_pairs=False):
 
 def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resume=False,
              holdout_frac=0.12, patience=20):
-    """
-    PHASE 1: pretrain on the general S2648 corpus (+inverse mutations, +
-    synthetic multi-point combos as weak/approximate augmentation -- see
-    dataset.py's docstring on why that's pretraining-only). No PETase data
-    at all in this phase, so nothing here can leak into the benchmark.
-    Includes early stopping based on held-out validation Spearman rho.
-    """
     print("=" * 70)
     print("PHASE 1: PRETRAINING on S2648 general protein-stability corpus")
     print("=" * 70)
@@ -216,11 +194,6 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
     )
     print(f"\nPretraining set: {len(dataset)} total rows across {len(dataset.base_graphs)} protein/chain graphs")
 
-    # HELD-OUT PROTEIN SPLIT: carve out whole protein backbones (not
-    # individual rows) so the model never sees any row -- real, inverse, or
-    # synthetic -- from a held-out protein during training. This is the
-    # actual generalization signal; row-level splits would leak information
-    # across mutations of the same protein.
     all_protein_keys = sorted(dataset.df["protein_key"].unique().tolist())
     shuffled_keys = all_protein_keys[:]
     random.Random(RANDOM_SEED).shuffle(shuffled_keys)
@@ -265,8 +238,6 @@ def pretrain(epochs=200, batch_size=16, lr=5e-4, augment_combinations=True, resu
         )
         scheduler.step()
 
-        # val_rho_overall == val_rho_real here since val_loader is real-only,
-        # but both are returned for clarity/consistency with the train side.
         saved = ""
         if not np.isnan(val_rho_overall) and val_rho_overall > best_val_rho:
             best_val_rho = val_rho_overall
@@ -304,21 +275,14 @@ def zero_shot_eval_note():
 
 
 def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30, lr=1e-4):
-    """
-    PHASE 2 (optional, light-touch): freezes the EGNN backbone entirely and
-    only fits the small regression head, using the handful of REAL,
-    verified PETase-specific rows. Deliberately NOT a full fine-tune --
-    with only 4 real rows, updating the whole network risks catastrophic
-    forgetting of everything pretraining learned. 
-    """
     print("=" * 70)
     print("PHASE 2: LIGHT CALIBRATION (regression head only) on real PETase data")
     print("=" * 70)
 
     registry = build_registry(verbose=False)
     dataset = PETaseMutationDataset(
-        csv_paths=["data/mutations_clean.csv"],  # the 4 real, verified 6EQE rows
-        augment_inverse=True, augment_combinations=False,  # NEVER synthetic here
+        csv_paths=["data/mutations_clean.csv"],
+        augment_inverse=True, augment_combinations=False,
         registry=registry,
     )
     print(f"Calibration set: {len(dataset)} rows (real experimental data only)")
@@ -332,7 +296,6 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
 
     model.load_state_dict(torch.load(pretrained_checkpoint))
 
-    # Freeze everything except the regression head
     for name, param in model.named_parameters():
         param.requires_grad = "regression_head" in name
     trainable = [p for p in model.parameters() if p.requires_grad]
@@ -350,8 +313,9 @@ def calibrate(pretrained_checkpoint="checkpoints/pretrained_s2648.pt", epochs=30
     print(f"\nCalibration complete. Saved: checkpoints/calibrated_petase.pt")
     print("Evaluate with: python -m src.benchmark_eval --checkpoint checkpoints/calibrated_petase.pt")
     print("NOTE: with only ~4 real calibration rows, this loop has no held-out split of its own -- "
-          "report leave-one-out Spearman separately (not yet implemented here) rather than treating "
-          "this training-set rho as a generalization claim.")
+          "report leave-one-out Spearman separately rather than treating this training-set rho "
+          "as a generalization claim. (Current guidance: skip this phase and evaluate the "
+          "pretrained checkpoint directly -- calibration was found to degrade benchmark performance.)")
 
 
 if __name__ == "__main__":
