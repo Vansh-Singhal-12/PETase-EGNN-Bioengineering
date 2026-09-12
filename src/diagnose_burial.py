@@ -1,34 +1,27 @@
 """
-Diagnostic: checks whether top-ranked screening candidates are dominated by
-a "bulky residue -> small residue" shortcut at BURIED positions specifically
-(where that substitution is most likely to be genuinely destabilizing due to
-cavity formation / loss of packing, rather than a real structural insight).
+Diagnostic v2: generalizes the burial-bias check to rows with ANY number of
+mutated positions (1 for Round 1 singles, 2 for Round 2 pairwise combos,
+3-5 for later higher-order combos) -- same burial proxy as v1 (8A contact
+degree), plus a position-frequency summary to make cluster-repetition
+visible directly rather than requiring a manual scan.
 
-Burial proxy: uses the same 8A Euclidean-distance graph already built by
-dataset.py's _load_protein_as_graph -- a residue's "degree" (number of other
-Calpha atoms within 8A) is a simple, dependency-free stand-in for solvent
-burial. Buried core residues typically have high degree (many neighbors
-packed around them); surface-exposed residues typically have low degree.
-This is a proxy, not a substitute for real solvent-accessible-surface-area
-(SASA) calculation -- flagged as such in the output.
-
-No external tools required (no DSSP binary needed), reuses existing PDB
-parsing via protein_registry.
+Works on either round1_ranked.csv (columns: predicted_score) or
+round2_combo_ranked.csv (columns: combo_score, epistasis_score) --
+auto-detects which score column to use.
 """
 import argparse
 import csv
 import numpy as np
+from collections import Counter
 from Bio.PDB import PDBParser
 
 from src.protein_registry import build_registry
-from src.dataset import three_to_one
 
 BULKY_HYDROPHOBIC = set("ILVFWMY")
 SMALL_FLEXIBLE = set("GPAS")
 
 
 def compute_burial_degrees(protein_key="6EQE", cutoff=8.0):
-    """Returns dict: real_residue_number -> degree (count of neighbors within cutoff)."""
     registry = build_registry(verbose=False)
     cfg = registry[protein_key]
     parser = PDBParser(QUIET=True)
@@ -53,70 +46,92 @@ def compute_burial_degrees(protein_key="6EQE", cutoff=8.0):
     return dict(zip(res_numbers, degrees)), degrees
 
 
-def diagnose(ranked_csv_path, top_n=50, protein_key="6EQE", degree_cutoff=8.0):
+def detect_score_column(rows):
+    """Round 1 uses 'predicted_score'; Round 2 uses 'combo_score' (and optionally
+    'epistasis_score', selectable separately)."""
+    if not rows:
+        return None
+    if "predicted_score" in rows[0]:
+        return "predicted_score"
+    if "combo_score" in rows[0]:
+        return "combo_score"
+    raise ValueError("Couldn't find a recognized score column in this CSV.")
+
+
+def diagnose(ranked_csv_path, top_n=50, protein_key="6EQE", degree_cutoff=8.0,
+             sort_by=None):
     burial_by_pos, all_degrees = compute_burial_degrees(protein_key, degree_cutoff)
-    median_degree = float(np.median(all_degrees))
     p75_degree = float(np.percentile(all_degrees, 75))
 
-    print(f"[diagnose_burial] Whole-protein degree stats (8A contact count): "
-          f"median={median_degree:.1f}, 75th pct={p75_degree:.1f}, "
-          f"max={all_degrees.max()}, min={all_degrees.min()}")
-    print(f"[diagnose_burial] Using >75th percentile ({p75_degree:.1f} neighbors) as 'likely buried' threshold.\n")
+    print(f"[diagnose_burial v2] 75th pct degree (buried threshold): {p75_degree:.1f}\n")
 
-    rows = []
     with open(ranked_csv_path) as f:
-        reader = csv.DictReader(f)
-        for r in reader:
-            rows.append(r)
+        rows = list(csv.DictReader(f))
 
+    score_col = sort_by or detect_score_column(rows)
+    # Filter out rows with missing/empty score (can happen for epistasis_score
+    # on rows where a component single-point score was missing)
+    rows = [r for r in rows if r.get(score_col, "") not in ("", None)]
+    rows.sort(key=lambda r: float(r[score_col]), reverse=True)
     top_rows = rows[:top_n]
 
-    print(f"{'WT->Mut':<10}{'Pos':<6}{'Score':<10}{'Degree':<8}{'Buried?':<10}{'Pattern'}")
-    print("-" * 70)
+    print(f"[diagnose_burial v2] Analyzing top {len(top_rows)} rows by '{score_col}'\n")
+    print(f"{'WT->Mut':<20}{'Positions':<16}{'Score':<10}{'#Buried':<10}{'#BulkySmall'}")
+    print("-" * 75)
 
-    n_bulky_to_small = 0
-    n_bulky_to_small_buried = 0
-    n_buried_total = 0
+    position_counter = Counter()
+    n_rows_with_any_buried = 0
+    n_rows_all_bulky_small = 0
+    total_legs = 0
+    total_buried_legs = 0
+    total_bulky_small_legs = 0
 
     for r in top_rows:
-        wt = r["wild_type"]
-        mut = r["mutation_type"]
-        pos = int(r["position_idx"].split(",")[0])
-        score = float(r["predicted_score"])
-        degree = burial_by_pos.get(pos, None)
+        wt_parts = r["wild_type"].split(";")
+        mut_parts = r["mutation_type"].split(";")
+        pos_parts = [int(p) for p in r["position_idx"].split(",")]
+        score = float(r[score_col])
 
-        if degree is None:
-            print(f"{wt}->{mut:<7}{pos:<6}{score:<10.3f}{'?':<8}{'unknown (no PDB match)'}")
-            continue
+        n_buried_legs_this_row = 0
+        n_bulky_small_legs_this_row = 0
 
-        is_buried = degree >= p75_degree
-        pattern = ""
-        if ";" not in wt and ";" not in mut:
+        for wt, mut, pos in zip(wt_parts, mut_parts, pos_parts):
+            position_counter[pos] += 1
+            total_legs += 1
+            degree = burial_by_pos.get(pos)
+            if degree is not None and degree >= p75_degree:
+                n_buried_legs_this_row += 1
+                total_buried_legs += 1
             if wt in BULKY_HYDROPHOBIC and mut in SMALL_FLEXIBLE:
-                pattern = "BULKY->SMALL"
-                n_bulky_to_small += 1
-                if is_buried:
-                    n_bulky_to_small_buried += 1
+                n_bulky_small_legs_this_row += 1
+                total_bulky_small_legs += 1
 
-        if is_buried:
-            n_buried_total += 1
+        if n_buried_legs_this_row > 0:
+            n_rows_with_any_buried += 1
+        if n_bulky_small_legs_this_row == len(wt_parts):
+            n_rows_all_bulky_small += 1
 
-        print(f"{wt}->{mut:<7}{pos:<6}{score:<10.3f}{degree:<8}{'YES' if is_buried else 'no':<10}{pattern}")
+        wt_mut_str = ";".join(f"{w}->{m}" for w, m in zip(wt_parts, mut_parts))
+        pos_str = ",".join(str(p) for p in pos_parts)
+        print(f"{wt_mut_str:<20}{pos_str:<16}{score:<10.3f}"
+              f"{n_buried_legs_this_row}/{len(pos_parts):<8}{n_bulky_small_legs_this_row}/{len(pos_parts)}")
 
-    print("-" * 70)
-    print(f"\n[diagnose_burial] SUMMARY (top {len(top_rows)} candidates):")
-    print(f"  Bulky-hydrophobic -> small/flexible substitutions : {n_bulky_to_small} "
-          f"({100*n_bulky_to_small/len(top_rows):.0f}% of top {len(top_rows)})")
-    print(f"  ...of those, at BURIED positions (>75th pct degree): {n_bulky_to_small_buried} "
-          f"({100*n_bulky_to_small_buried/max(1,n_bulky_to_small):.0f}% of the bulky->small group)")
-    print(f"  Total candidates at buried positions (any mutation type): {n_buried_total} "
-          f"({100*n_buried_total/len(top_rows):.0f}% of top {len(top_rows)})")
-    print(f"\n  [interpretation] If n_bulky_to_small is a large fraction of the top list AND")
-    print(f"  most of those are at buried positions, this supports the hypothesis that the")
-    print(f"  model is applying a 'shrink buried residues' shortcut rather than genuine")
-    print(f"  position-specific structural reasoning. This is a PROXY (contact-count burial,")
-    print(f"  not true SASA) -- treat as a flag for closer FoldX/ColabFold scrutiny on these")
-    print(f"  specific candidates, not as a final verdict.")
+    print("-" * 75)
+    print(f"\n[diagnose_burial v2] SUMMARY (top {len(top_rows)} rows, {total_legs} total mutation-legs):")
+    print(f"  Rows with >=1 buried leg          : {n_rows_with_any_buried} ({100*n_rows_with_any_buried/len(top_rows):.0f}%)")
+    print(f"  Rows where ALL legs are bulky->small: {n_rows_all_bulky_small} ({100*n_rows_all_bulky_small/len(top_rows):.0f}%)")
+    print(f"  Buried legs / total legs            : {total_buried_legs}/{total_legs} ({100*total_buried_legs/max(1,total_legs):.0f}%)")
+    print(f"  Bulky->small legs / total legs      : {total_bulky_small_legs}/{total_legs} ({100*total_bulky_small_legs/max(1,total_legs):.0f}%)")
+
+    print(f"\n[diagnose_burial v2] POSITION FREQUENCY (how often each position recurs in the top {len(top_rows)}):")
+    for pos, count in position_counter.most_common(15):
+        degree = burial_by_pos.get(pos, "?")
+        buried_flag = "BURIED" if isinstance(degree, (int, np.integer)) and degree >= p75_degree else ""
+        print(f"    Position {pos:<5} appears {count:>3}x  (degree={degree} {buried_flag})")
+
+    n_unique_positions = len(position_counter)
+    print(f"\n  Unique positions represented: {n_unique_positions} "
+          f"(out of {total_legs} total legs -- lower means more repetition/less diversity)")
 
 
 if __name__ == "__main__":
@@ -124,6 +139,9 @@ if __name__ == "__main__":
     ap.add_argument("--ranked_csv", type=str, default="results/round1_ranked.csv")
     ap.add_argument("--top_n", type=int, default=50)
     ap.add_argument("--protein_key", type=str, default="6EQE")
+    ap.add_argument("--sort_by", type=str, default=None,
+                     help="Column to sort/rank by (e.g. 'combo_score' or 'epistasis_score'). "
+                          "Auto-detected if omitted.")
     args = ap.parse_args()
 
-    diagnose(args.ranked_csv, top_n=args.top_n, protein_key=args.protein_key)
+    diagnose(args.ranked_csv, top_n=args.top_n, protein_key=args.protein_key, sort_by=args.sort_by)
