@@ -63,15 +63,17 @@ def annotate_candidates(candidates_csv_path, output_path, protein_key="6EQE",
     annotated = []
     n_flexible = 0
     for r in rows:
-        pos = int(r["position_idx"].split(",")[0]) if "position_idx" in r else int(r["position_idx"])
-        bfactor = bfactors_by_pos.get(pos)
-        is_flexible = bfactor is not None and bfactor >= flex_threshold
-        if is_flexible:
+        pos_list = [int(p) for p in r["position_idx"].split(",")]
+        bfactors = [bfactors_by_pos.get(p) for p in pos_list]
+        any_flexible = any(b is not None and b >= flex_threshold for b in bfactors)
+        if any_flexible:
             n_flexible += 1
 
         new_row = dict(r)
-        new_row["bfactor"] = bfactor if bfactor is not None else ""
-        new_row["is_flexible_region"] = is_flexible
+        new_row["bfactors_per_position"] = ";".join(
+            f"{b:.2f}" if b is not None else "NA" for b in bfactors
+        )
+        new_row["is_flexible_region"] = any_flexible
         annotated.append(new_row)
 
     fieldnames = list(annotated[0].keys()) if annotated else []
