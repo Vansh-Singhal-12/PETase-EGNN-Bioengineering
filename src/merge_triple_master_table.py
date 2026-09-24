@@ -53,9 +53,9 @@ def merge_tables(foldx_full_path, triad_drift_path, output_path):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--foldx_full", type=str, default="results/foldx_triple_full.csv")
-    ap.add_argument("--triad_drift", type=str, default="results/triad_drift_triples.csv")
-    ap.add_argument("--output", type=str, default="results/triple_master_table.csv")
+    ap.add_argument("--foldx_full", type=str, default="results/rational_triples_full.csv")
+    ap.add_argument("--triad_drift", type=str, default="results/rational_triples_drift.csv")
+    ap.add_argument("--output", type=str, default="results/triple_rational_master_table.csv")
     args = ap.parse_args()
 
     merge_tables(args.foldx_full, args.triad_drift, args.output)

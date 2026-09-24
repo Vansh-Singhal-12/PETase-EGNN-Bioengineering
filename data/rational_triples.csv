@@ -1,0 +1,6 @@
+wild_type,mutation_type,position_idx,stability_score,protein_id
+T;S;S,P;N;P,"116,238,290",0.0,6EQE
+S;D;T,E;H;P,"121,186,116",0.0,6EQE
+S;D;W,E;H;H,"121,186,159",0.0,6EQE
+S;D;S,E;H;Y,"121,186,238",0.0,6EQE
+S;D;R,E;H;A,"121,186,280",0.0,6EQE
