@@ -1,0 +1,2 @@
+wild_type,mutation_type,position_idx,max_triad_embedding_drift,mean_triad_embedding_drift,drift_flag
+N;N;N;S,I;K;K;V,"114,205,233,269",0.24182677268981934,0.005772101227194071,True

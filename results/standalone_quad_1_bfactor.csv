@@ -1,0 +1,2 @@
+wild_type,mutation_type,position_idx,foldx_triple_score,additive_expectation_3singles,epistasis_3singles,bfactors_per_position,is_flexible_region
+N;N;N;S,I;K;K;V,"114,205,233,269",1.78881,-7.416464,9.205274000000001,8.30;11.14;11.02;7.75,True
