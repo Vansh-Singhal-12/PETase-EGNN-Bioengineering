@@ -1,0 +1,10 @@
+C:\docking\runs_wt_noise\control_WT\vina_seed1.log:   1       -4.937          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed10.log:   1        -4.94          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed2.log:   1       -4.887          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed3.log:   1       -4.888          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed4.log:   1       -4.886          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed5.log:   1       -4.944          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed6.log:   1       -4.947          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed7.log:   1       -4.909          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed8.log:   1       -4.802          0          0
+C:\docking\runs_wt_noise\control_WT\vina_seed9.log:   1       -4.905          0          0
