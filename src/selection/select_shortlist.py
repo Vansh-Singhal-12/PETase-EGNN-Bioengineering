@@ -1,19 +1,20 @@
 import argparse, csv, random
 from collections import Counter
-
+ 
 ap = argparse.ArgumentParser()
 ap.add_argument("--merged", required=True)
 ap.add_argument("--out", default="md_shortlist.csv")
 ap.add_argument("--n-picks", type=int, default=10, help="rule-based picks (manual ones are extra)")
 ap.add_argument("--bg-frac", type=float, default=0.5)
 ap.add_argument("--seed", type=int, default=42)
+ap.add_argument("--neg-window", type=float, default=1.5, help="negative controls: FoldX within this of the pool median")
 ap.add_argument("--manual", action="append", default=[], help='ID:reason, may be repeated')
 args = ap.parse_args()
-
+ 
 def f(x):
     try: return float(x)
     except (TypeError, ValueError): return None
-
+ 
 rows = list(csv.DictReader(open(args.merged, newline="")))
 for r in rows:
     r["muts"] = set(r["mutations"].split(";"))
@@ -27,13 +28,13 @@ for r in rows:
     r["dist"] = r["muts"] - background
 print(f"{n} candidates. Background mutations (in >= {args.bg_frac:.0%} of the pool): "
       + ", ".join(f"{m} ({freq[m]})" for m in sorted(background, key=lambda m: -freq[m])))
-
+ 
 ranked = sorted([r for r in rows if r["foldx"] is not None], key=lambda r: -r["foldx"])
 picked, reasons, relaxed_notes = [], {}, []
-
+ 
 def min_diff(r):
     return min((len(r["dist"] ^ p["dist"]) for p in picked), default=99)
-
+ 
 def try_add(r, why):
     if r["candidate_id"] in reasons:
         reasons[r["candidate_id"]].append(why); return True
@@ -43,10 +44,10 @@ def try_add(r, why):
             if need < 3: relaxed_notes.append(f"{r['candidate_id']} ({why}) added with diversity threshold {need}")
             return True
     return False
-
+ 
 def best(pred):
     return next((r for r in ranked if pred(r)), None)
-
+ 
 slots = [("disulfide design", lambda r: r["cys"] >= 2),
          ("5-point combination", lambda r: r["n"] == 5),
          ("lacks E231K", lambda r: "E231K" not in r["muts"]),
@@ -58,12 +59,20 @@ for why, pred in slots:
     for r in cand:                              # best FoldX one that satisfies diversity (or is already picked)
         if r["candidate_id"] in reasons or min_diff(r) >= 1:
             try_add(r, why); break
-
-for r in ranked:                                # fill the rest in FoldX order
-    if len(picked) >= args.n_picks: break
-    if r["candidate_id"] not in reasons:
-        try_add(r, "FoldX rank")
-
+ 
+def fill_one():
+    for need in (3, 2, 1):
+        for r in ranked:
+            if r["candidate_id"] not in reasons and min_diff(r) >= need:
+                picked.append(r); reasons[r["candidate_id"]] = ["FoldX rank"]
+                if need < 3:
+                    relaxed_notes.append(f"{r['candidate_id']} (FoldX rank) added with diversity threshold {need}")
+                return True
+    return False
+ 
+while len(picked) < args.n_picks and fill_one():
+    pass
+ 
 manual = []
 for item in args.manual:
     cid, _, why = item.partition(":")
@@ -71,14 +80,14 @@ for item in args.manual:
     if r is None: print(f"WARNING: manual id {cid} not found"); continue
     if cid in reasons: print(f"NOTE: {cid} was already picked by the rules"); continue
     manual.append(r); reasons[cid] = [f"MANUAL: {why}"]
-
+ 
 pool_med = sorted(r["foldx"] for r in ranked)[len(ranked) // 2]
 chosen_ids = set(reasons)
 negs = [r for r in rows if r["candidate_id"] not in chosen_ids and r["foldx"] is not None
-        and abs(r["foldx"] - pool_med) <= 3 and 7 <= r["n"] <= 9]
+        and abs(r["foldx"] - pool_med) <= args.neg_window and 7 <= r["n"] <= 9]
 random.Random(args.seed).shuffle(negs)
 negs = negs[:2]
-
+ 
 print(f"\nPool median FoldX score: {pool_med:.1f}")
 print(f"\nPROPOSED MD SET ({len(picked)} rule-based + {len(manual)} manual + {len(negs)} negative controls + controls)\n")
 print(f"{'id':<15}{'n':>3}{'foldx':>7}{'esm':>7}{'drift':>7} {'flags':<14}distinguishing mutations   <- why")
@@ -95,9 +104,14 @@ for r in picked + manual:
 for r in negs:
     show(r, "NEGATIVE CONTROL (median FoldX)")
 print("Fixed controls: control_WT (3 replicates), control_FASTPETase")
+if len(picked + manual) > 1:
+    allp = picked + manual
+    pairs = sorted((len(a["dist"] ^ b["dist"]), a["candidate_id"], b["candidate_id"]) for i, a in enumerate(allp) for b in allp[i + 1:])
+    print("Most similar pairs among the picks (differences in distinguishing mutations):",
+          "; ".join(f"{a}/{b}: {d}" for d, a, b in pairs[:3]))
 for note in relaxed_notes:
     print("NOTE:", note)
-
+ 
 with open(args.out, "w", newline="") as fh:
     w = csv.writer(fh)
     w.writerow(["candidate_id", "role", "reason", "n_mut", "foldx_score", "esm_additive_score", "drift_flag", "touches_90_or_168", "mutations"])

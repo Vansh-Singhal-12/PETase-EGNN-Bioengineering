@@ -1,0 +1,23 @@
+candidate_id,role,reason,n_mut,foldx_score,esm_additive_score,drift_flag,touches_90_or_168,mutations
+candidate_057,rule_pick,disulfide design; lacks E231K,10,-1.3682,-13.5367,False,False,S58A;S61V;K95N;S121E;D186H;F201I;N233C;S269V;R280A;S282C
+candidate_070,rule_pick,5-point combination,5,9.46162,7.4186,True,True,R90D;Q127L;Q182L;E231K;K252L
+candidate_001,rule_pick,ESM consensus (esm > 0),9,13.5261,2.8245,False,True,S124A;Q127L;I168R;Q182L;T189Y;D220L;E231K;K252L;T270E
+candidate_002,rule_pick,FoldX rank,9,13.2203,-2.7605,False,False,T116P;Q127L;Q182L;D220L;E231K;S238N;K252L;T270E;S290P
+candidate_003,rule_pick,FoldX rank,8,12.5895,3.4484,False,True,R90D;T116P;Q127L;Q182L;E231K;S238N;K252L;S290P
+candidate_005,rule_pick,FoldX rank,9,12.2187,1.6343,False,True,R90D;Q127L;Q182L;S188Q;S214T;D220L;E231K;K252L;T270E
+candidate_008,rule_pick,FoldX rank,8,11.8957,-4.3851,False,True,N114K;Q127L;I168R;Q182L;S188Q;D220L;E231K;K252L
+candidate_009,rule_pick,FoldX rank,9,11.7616,-8.2669,False,False,T51M;T116P;Q182L;T198V;E231K;S238N;K252L;M262L;S290P
+candidate_011,rule_pick,FoldX rank,8,11.6416,-3.242,False,False,T72V;T116P;S121E;Q127L;Q182L;D186H;E231K;K252L
+candidate_019,rule_pick,FoldX rank,9,10.7427,-3.3128,False,False,T29M;S58W;H104M;Q127L;Q182L;D220L;E231K;S245P;K252L
+candidate_047,negative_control,median FoldX,9,7.64298,-8.9048,False,False,T29M;T51M;S58W;H104M;Q182L;T198V;E231K;S245P;M262L
+candidate_025,negative_control,median FoldX,7,9.97386,-5.7496,False,False,T116P;Q182L;S214T;E231K;S238N;K252L;S290P
+candidate_058,engineering_design,A171C/S193C disulfide only with D186V,11,-1.4869,-21.7932,False,False,K95N;N114I;S121E;S124N;A171C;D186V;S193C;F201I;S269V;T270Q;R280A
+candidate_059,engineering_design,N233C/S282C disulfide only with D186V,9,-1.67235,-10.6236,False,False,K95N;S121E;S124N;D186V;F201I;N233C;S269V;R280A;S282C
+candidate_060,engineering_design,N233C/S282C disulfide with D186H and I168R,10,-1.8112,-12.9372,False,True,K95N;S121E;S124N;I168R;D186H;F201I;N233C;S269V;R280A;S282C
+candidate_061,engineering_design,FAST-PETase five plus A171C/S193C disulfide with I168R and S124N,9,-1.82148,-19.2264,False,True,S121E;S124N;I168R;A171C;D186H;S193C;R224Q;N233K;R280A
+candidate_062,engineering_design,both disulfide pairs with D186V,9,-1.93361,-21.1726,False,False,K95N;S121E;A171C;D186V;S193C;N233C;S269V;R280A;S282C
+candidate_064,engineering_design,N233C/S282C disulfide with D186V plus E204R and G234D,9,-2.20051,-13.6169,False,False,K95N;S121E;S124N;D186V;E204R;N233C;G234D;R280A;S282C
+candidate_065,engineering_design,FAST-PETase five plus A171C/S193C disulfide with I168R,10,-2.3076,-19.5255,False,True,K95N;S121E;I168R;A171C;D186H;S193C;R224Q;N233K;S269V;R280A
+candidate_066,engineering_design,both disulfide pairs with D186H,10,-2.87393,-18.1687,False,False,K95N;S121E;A171C;D186H;S193C;F201I;N233C;T270Q;R280A;S282C
+control_WT,control,"3 replicates, seeds 1-3",,,,,,
+control_FASTPETase,control,known thermostable variant,5,,,,,S121E;D186H;R224Q;N233K;R280A
