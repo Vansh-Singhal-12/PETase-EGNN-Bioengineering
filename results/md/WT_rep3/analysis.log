@@ -1,0 +1,11 @@
+WT_rep3: 300 frames, 30.0 ns total; analysing 250 frames after 5.0 ns
+
+RMSD (backbone)           1.94 +/- 0.14 A   (max 2.43; drift -0.003 A/ns)
+Radius of gyration        17.20 +/- 0.07 A
+SASA                      111.5 nm^2
+RMSF (mean / max)         0.98 / 4.61 A (max at real position 207)
+Ser OG - His NE2          6.58 +/- 2.62 A
+His ND1 - Asp OD          3.29 +/- 1.03 A
+Triad intact (<= 3.5 A)   18% of frames
+
+Wrote WT_rep3_timeseries.csv, WT_rep3_rmsf.csv, WT_rep3_summary.json in results\md\WT_rep3

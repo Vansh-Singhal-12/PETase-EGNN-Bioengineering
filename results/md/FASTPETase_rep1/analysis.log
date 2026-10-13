@@ -1,0 +1,11 @@
+FASTPETase_rep1: 300 frames, 30.0 ns total; analysing 250 frames after 5.0 ns
+
+RMSD (backbone)           1.60 +/- 0.19 A   (max 2.10; drift +0.018 A/ns)
+Radius of gyration        17.13 +/- 0.07 A
+SASA                      109.2 nm^2
+RMSF (mean / max)         0.99 / 4.17 A (max at real position 29)
+Ser OG - His NE2          4.03 +/- 1.84 A
+His ND1 - Asp OD          3.29 +/- 0.88 A
+Triad intact (<= 3.5 A)   70% of frames
+
+Wrote FASTPETase_rep1_timeseries.csv, FASTPETase_rep1_rmsf.csv, FASTPETase_rep1_summary.json in results\md\FASTPETase_rep1
