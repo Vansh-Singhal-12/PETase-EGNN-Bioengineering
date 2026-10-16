@@ -3,7 +3,7 @@ import argparse, csv, json, os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ap = argparse.ArgumentParser()
 ap.add_argument("--data-root", required=True)
-ap.add_argument("--names", nargs="+", required=True)
+ap.add_argument("--names", nargs="*", default=[], help="run names; if omitted, every folder in DATA_ROOT that holds a NAME_traj.dcd is analysed")
 ap.add_argument("--out-root", default=os.path.join("results", "md"))
 ap.add_argument("--frame-ps", default="100")
 ap.add_argument("--skip-ns", default="5")
@@ -11,6 +11,11 @@ ap.add_argument("--ser", default="132")
 ap.add_argument("--asp", default="178")
 ap.add_argument("--his", default="209")
 args = ap.parse_args()
+
+if not args.names:
+    args.names = sorted(d for d in os.listdir(args.data_root)
+                        if os.path.exists(os.path.join(args.data_root, d, f"{d}_traj.dcd")))
+    print(f"Found {len(args.names)} runs in {args.data_root}: " + ", ".join(args.names))
 
 summaries = {}
 for name in args.names:
