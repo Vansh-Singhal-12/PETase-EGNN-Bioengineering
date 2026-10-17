@@ -1,0 +1,11 @@
+candidate_060_s1: 300 frames, 30.0 ns total; analysing 250 frames after 5.0 ns
+
+RMSD (backbone)           2.08 +/- 0.24 A   (max 2.55; drift +0.017 A/ns)
+Radius of gyration        17.16 +/- 0.07 A
+SASA                      110.0 nm^2
+RMSF (mean / max)         0.99 / 5.65 A (max at real position 29)
+Ser OG - His NE2          3.42 +/- 0.73 A
+His ND1 - Asp OD          2.92 +/- 0.23 A
+Triad intact (<= 3.5 A)   67% of frames
+
+Wrote candidate_060_s1_timeseries.csv, candidate_060_s1_rmsf.csv, candidate_060_s1_summary.json in C:\Dev\PETase-EGNN-Bioengineering\results\md\candidate_060_s1

@@ -8,4 +8,4 @@ Ser OG - His NE2          4.03 +/- 1.84 A
 His ND1 - Asp OD          3.29 +/- 0.88 A
 Triad intact (<= 3.5 A)   70% of frames
 
-Wrote FASTPETase_rep1_timeseries.csv, FASTPETase_rep1_rmsf.csv, FASTPETase_rep1_summary.json in results\md\FASTPETase_rep1
+Wrote FASTPETase_rep1_timeseries.csv, FASTPETase_rep1_rmsf.csv, FASTPETase_rep1_summary.json in C:\Dev\PETase-EGNN-Bioengineering\results\md\FASTPETase_rep1

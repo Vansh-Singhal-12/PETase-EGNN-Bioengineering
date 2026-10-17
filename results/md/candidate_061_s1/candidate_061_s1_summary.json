@@ -1,0 +1,25 @@
+{
+  "name": "candidate_061_s1",
+  "frames": 300,
+  "total_ns": 30.0,
+  "window_ns": [
+    5.0,
+    30.0
+  ],
+  "rmsd_mean_A": 1.763,
+  "rmsd_sd_A": 0.411,
+  "rmsd_max_A": 2.333,
+  "rmsd_drift_A_per_ns": 0.0526,
+  "rg_mean_A": 17.08,
+  "rg_sd_A": 0.07,
+  "sasa_mean_nm2": 110.52,
+  "rmsf_mean_A": 1.077,
+  "rmsf_max_A": 5.481,
+  "rmsf_max_real_position": 211,
+  "d_SerOG_HisNE2_mean_A": 11.185,
+  "d_SerOG_HisNE2_sd_A": 7.155,
+  "d_HisND1_AspOD_mean_A": 6.005,
+  "d_HisND1_AspOD_sd_A": 2.84,
+  "triad_intact_fraction": 0.292,
+  "triad_cutoff_A": 3.5
+}

@@ -8,4 +8,4 @@ Ser OG - His NE2          4.53 +/- 0.80 A
 His ND1 - Asp OD          2.89 +/- 0.20 A
 Triad intact (<= 3.5 A)   15% of frames
 
-Wrote WT_rep2_timeseries.csv, WT_rep2_rmsf.csv, WT_rep2_summary.json in results\md\WT_rep2
+Wrote WT_rep2_timeseries.csv, WT_rep2_rmsf.csv, WT_rep2_summary.json in C:\Dev\PETase-EGNN-Bioengineering\results\md\WT_rep2

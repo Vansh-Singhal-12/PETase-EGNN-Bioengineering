@@ -1,0 +1,25 @@
+{
+  "name": "FASTPETase_rep2",
+  "frames": 300,
+  "total_ns": 30.0,
+  "window_ns": [
+    5.0,
+    30.0
+  ],
+  "rmsd_mean_A": 2.205,
+  "rmsd_sd_A": 0.107,
+  "rmsd_max_A": 2.517,
+  "rmsd_drift_A_per_ns": 0.0033,
+  "rg_mean_A": 17.088,
+  "rg_sd_A": 0.068,
+  "sasa_mean_nm2": 110.45,
+  "rmsf_mean_A": 0.939,
+  "rmsf_max_A": 4.329,
+  "rmsf_max_real_position": 29,
+  "d_SerOG_HisNE2_mean_A": 3.104,
+  "d_SerOG_HisNE2_sd_A": 0.456,
+  "d_HisND1_AspOD_mean_A": 2.909,
+  "d_HisND1_AspOD_sd_A": 0.206,
+  "triad_intact_fraction": 0.852,
+  "triad_cutoff_A": 3.5
+}
