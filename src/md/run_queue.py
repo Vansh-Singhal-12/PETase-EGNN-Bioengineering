@@ -1,15 +1,3 @@
-"""
-run_queue.py - run the MD queue on ONE GPU machine, several simulations at the same time.
-
-Runs every job in BASE/inputs/queue.json (made by gather_md_inputs.py) with run_md.py, N at a time.
-Safe to stop (Ctrl+C or a dropped connection) and restart: finished jobs are skipped and unfinished ones resume
-from their last checkpoint.
-
-Typical use on the Jetstream2 machine (inside the 'md' conda environment):
-  cd ~/md
-  nohup python run_queue.py --base ~/md --workers 4 > queue.log 2>&1 &
-  tail -f queue.log        (Ctrl+C stops watching, NOT the runs)
-"""
 import argparse, json, os, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -17,11 +5,12 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--base", required=True, help="folder that contains run_md.py and inputs/queue.json")
 ap.add_argument("--workers", type=int, default=4, help="simulations running at the same time")
 ap.add_argument("--only", default="", help="only run jobs whose name contains this text")
+ap.add_argument("--queue", default="queue.json", help="queue file inside BASE/inputs (e.g. queue_seed2.json)")
 ap.add_argument("--status-sec", type=int, default=300)
 args = ap.parse_args()
 
 base = os.path.expanduser(args.base)
-queue = json.load(open(os.path.join(base, "inputs", "queue.json")))
+queue = json.load(open(os.path.join(base, "inputs", args.queue)))
 stamp = lambda: time.strftime("%H:%M:%S")
 
 def finished(job):
